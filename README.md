@@ -46,7 +46,7 @@
 
 ### 方式一：直接安装 VSIX
 
-1. 下载 `windsurf-SWITCH-1.0.0.vsix`
+1. 下载 `windsurf-SWITCH-1.0.0.vsix`(https://github.com/Rhys-Wang-wannaLearnMath/WindsurfSwitch/releases)
 2. 在 Windsurf 中：扩展 -> 从 VSIX 安装
 
 ### 方式二：从源码构建
