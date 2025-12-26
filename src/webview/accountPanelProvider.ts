@@ -12,205 +12,295 @@ import { ApiHelper } from '../services/apiHelper';
  * 账号面板提供者
  */
 export class AccountPanelProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'windsurfSwitch.accountPanel';
+  public static readonly viewType = 'windsurfSwitch.accountPanel';
 
-    private _view?: vscode.WebviewView;
-    private _accountManager: AccountManager;
-    private _accountSwitcher: AccountSwitcher;
+  private _view?: vscode.WebviewView;
+  private _accountManager: AccountManager;
+  private _accountSwitcher: AccountSwitcher;
 
-    constructor(
-        private readonly _extensionUri: vscode.Uri,
-        accountManager: AccountManager,
-        accountSwitcher: AccountSwitcher
-    ) {
-        this._accountManager = accountManager;
-        this._accountSwitcher = accountSwitcher;
+  constructor(
+    private readonly _extensionUri: vscode.Uri,
+    accountManager: AccountManager,
+    accountSwitcher: AccountSwitcher
+  ) {
+    this._accountManager = accountManager;
+    this._accountSwitcher = accountSwitcher;
+  }
+
+  /**
+   * 解析 WebView
+   */
+  public resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ) {
+    this._view = webviewView;
+
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this._extensionUri]
+    };
+
+    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+    // 处理来自 WebView 的消息
+    webviewView.webview.onDidReceiveMessage(async (data: any) => {
+      switch (data.type) {
+        case 'getAccounts':
+          await this._sendAccountList();
+          break;
+
+        case 'getCurrentAccount':
+          await this._sendCurrentAccount();
+          break;
+
+        case 'switchAccount':
+          await this._switchAccount(data.accountId);
+          break;
+
+        case 'addAccount':
+          await this._addAccount(data.email, data.password);
+          break;
+
+        case 'deleteAccount':
+          await this._deleteAccount(data.accountId);
+          break;
+
+        case 'copyApiKey':
+          await this._copyApiKey(data.accountId);
+          break;
+      }
+    });
+
+    // 初始加载数据
+    this._sendAccountList();
+    this._sendCurrentAccount();
+  }
+
+  /**
+   * 刷新面板
+   */
+  public refresh() {
+    if (this._view) {
+      this._sendAccountList();
+      this._sendCurrentAccount();
+    }
+  }
+
+  /**
+   * 发送账号列表到 WebView
+   */
+  private async _sendAccountList() {
+    if (!this._view) return;
+
+    const accounts = await this._accountManager.getAccounts();
+    this._view.webview.postMessage({
+      type: 'accountList',
+      accounts: accounts.map(acc => ({
+        id: acc.id,
+        email: acc.email,
+        name: acc.name,
+        planName: acc.planName
+      }))
+    });
+  }
+
+  /**
+   * 发送当前账号到 WebView
+   */
+  private async _sendCurrentAccount() {
+    if (!this._view) return;
+
+    const current = await this._accountSwitcher.getCurrentAccount();
+    this._view.webview.postMessage({
+      type: 'currentAccount',
+      account: current ? { email: current.email, name: current.name } : null
+    });
+  }
+
+  /**
+   * 切换账号
+   */
+  private async _switchAccount(accountId: string) {
+    const account = await this._accountManager.getAccount(accountId);
+    if (!account) {
+      this._sendMessage('error', '账号不存在');
+      return;
     }
 
-    /**
-     * 解析 WebView
-     */
-    public resolveWebviewView(
-        webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken
-    ) {
-        this._view = webviewView;
+    this._sendMessage('info', '正在切换账号...');
+    const result = await this._accountSwitcher.switchAccount(account);
 
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri]
-        };
+    if (result.success) {
+      this._sendMessage('success', '切换成功，窗口即将重载...');
+    } else {
+      this._sendMessage('error', `切换失败: ${result.error}`);
+    }
+  }
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+  /**
+   * 添加账号
+   */
+  private async _addAccount(email: string, password: string) {
+    const parsed = this._parseAccountCredentials(email, password);
 
-        // 处理来自 WebView 的消息
-        webviewView.webview.onDidReceiveMessage(async (data) => {
-            switch (data.type) {
-                case 'getAccounts':
-                    await this._sendAccountList();
-                    break;
-
-                case 'getCurrentAccount':
-                    await this._sendCurrentAccount();
-                    break;
-
-                case 'switchAccount':
-                    await this._switchAccount(data.accountId);
-                    break;
-
-                case 'addAccount':
-                    await this._addAccount(data.email, data.password);
-                    break;
-
-                case 'deleteAccount':
-                    await this._deleteAccount(data.accountId);
-                    break;
-
-                case 'copyApiKey':
-                    await this._copyApiKey(data.accountId);
-                    break;
-            }
-        });
-
-        // 初始加载数据
-        this._sendAccountList();
-        this._sendCurrentAccount();
+    if (parsed.invalidSegments.length > 0) {
+      const preview = parsed.invalidSegments.slice(0, 3).join(' ; ');
+      this._sendMessage('error', `以下条目格式无效（应为 邮箱,密码，用 ; 分隔）：${preview}${parsed.invalidSegments.length > 3 ? ' ...' : ''}`);
+      if (parsed.pairs.length === 0) {
+        return;
+      }
     }
 
-    /**
-     * 刷新面板
-     */
-    public refresh() {
-        if (this._view) {
-            this._sendAccountList();
-            this._sendCurrentAccount();
-        }
-    }
+    if (parsed.isBatch) {
+      const apiHelper = new ApiHelper();
+      let successCount = 0;
+      let failCount = 0;
 
-    /**
-     * 发送账号列表到 WebView
-     */
-    private async _sendAccountList() {
-        if (!this._view) return;
+      this._sendMessage('info', `开始批量验证并导入，共 ${parsed.pairs.length} 个账号...`);
 
-        const accounts = await this._accountManager.getAccounts();
-        this._view.webview.postMessage({
-            type: 'accountList',
-            accounts: accounts.map(acc => ({
-                id: acc.id,
-                email: acc.email,
-                name: acc.name,
-                planName: acc.planName
-            }))
-        });
-    }
+      for (let i = 0; i < parsed.pairs.length; i++) {
+        const pair = parsed.pairs[i];
+        this._sendMessage('info', `(${i + 1}/${parsed.pairs.length}) 正在验证 ${pair.email}...`);
 
-    /**
-     * 发送当前账号到 WebView
-     */
-    private async _sendCurrentAccount() {
-        if (!this._view) return;
-
-        const current = await this._accountSwitcher.getCurrentAccount();
-        this._view.webview.postMessage({
-            type: 'currentAccount',
-            account: current ? { email: current.email, name: current.name } : null
-        });
-    }
-
-    /**
-     * 切换账号
-     */
-    private async _switchAccount(accountId: string) {
-        const account = await this._accountManager.getAccount(accountId);
-        if (!account) {
-            this._sendMessage('error', '账号不存在');
-            return;
-        }
-
-        this._sendMessage('info', '正在切换账号...');
-        const result = await this._accountSwitcher.switchAccount(account);
-
+        const result = await apiHelper.login(pair.email, pair.password);
         if (result.success) {
-            this._sendMessage('success', '切换成功，窗口即将重载...');
+          await this._accountManager.addAccount({
+            email: result.email!,
+            name: result.name!,
+            apiKey: result.apiKey!,
+            apiServerUrl: result.apiServerUrl!,
+            refreshToken: result.refreshToken!,
+            planName: 'Pro'
+          });
+          successCount++;
+          this._sendMessage('success', `账号 ${result.email} 添加成功！`);
         } else {
-            this._sendMessage('error', `切换失败: ${result.error}`);
+          failCount++;
+          this._sendMessage('error', `账号 ${pair.email} 登录失败: ${result.error}`);
         }
+      }
+
+      await this._sendAccountList();
+      this._sendMessage('success', `批量导入完成：成功 ${successCount}，失败 ${failCount}`);
+      return;
     }
 
-    /**
-     * 添加账号
-     */
-    private async _addAccount(email: string, password: string) {
-        this._sendMessage('info', '正在登录...');
+    this._sendMessage('info', '正在登录...');
 
-        const apiHelper = new ApiHelper((msg) => {
-            this._sendMessage('info', msg);
-        });
+    const apiHelper = new ApiHelper((msg) => {
+      this._sendMessage('info', msg);
+    });
 
-        const result = await apiHelper.login(email, password);
+    const result = await apiHelper.login(email, password);
 
-        if (result.success) {
-            await this._accountManager.addAccount({
-                email: result.email!,
-                name: result.name!,
-                apiKey: result.apiKey!,
-                apiServerUrl: result.apiServerUrl!,
-                refreshToken: result.refreshToken!,
-                planName: 'Pro'
-            });
+    if (result.success) {
+      await this._accountManager.addAccount({
+        email: result.email!,
+        name: result.name!,
+        apiKey: result.apiKey!,
+        apiServerUrl: result.apiServerUrl!,
+        refreshToken: result.refreshToken!,
+        planName: 'Pro'
+      });
 
-            this._sendMessage('success', `账号 ${result.email} 添加成功！`);
-            await this._sendAccountList();
-        } else {
-            this._sendMessage('error', `登录失败: ${result.error}`);
-        }
+      this._sendMessage('success', `账号 ${result.email} 添加成功！`);
+      await this._sendAccountList();
+    } else {
+      this._sendMessage('error', `登录失败: ${result.error}`);
+    }
+  }
+
+  private _parseAccountCredentials(email: string, password: string): {
+    isBatch: boolean;
+    pairs: Array<{ email: string; password: string }>;
+    invalidSegments: string[];
+  } {
+    const rawEmail = (email ?? '').trim().replace(/；/g, ';').replace(/，/g, ',');
+    const rawPassword = password ?? '';
+
+    const isBatch = rawEmail.includes(';') || (rawEmail.includes(',') && rawPassword.trim() === '');
+    if (!isBatch) {
+      return {
+        isBatch: false,
+        pairs: [{ email: rawEmail, password: rawPassword }],
+        invalidSegments: []
+      };
     }
 
-    /**
-     * 删除账号
-     */
-    private async _deleteAccount(accountId: string) {
-        const account = await this._accountManager.getAccount(accountId);
-        if (!account) {
-            this._sendMessage('error', '账号不存在');
-            return;
-        }
+    const segments = rawEmail
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean);
 
-        await this._accountManager.removeAccount(accountId);
-        this._sendMessage('success', `账号 ${account.email} 已删除`);
-        await this._sendAccountList();
+    const pairs: Array<{ email: string; password: string }> = [];
+    const invalidSegments: string[] = [];
+
+    for (const seg of segments) {
+      const commaIndex = seg.indexOf(',');
+      if (commaIndex <= 0 || commaIndex === seg.length - 1) {
+        invalidSegments.push(seg);
+        continue;
+      }
+
+      const e = seg.slice(0, commaIndex).trim();
+      const p = seg.slice(commaIndex + 1).trim();
+
+      if (!e || !p) {
+        invalidSegments.push(seg);
+        continue;
+      }
+
+      pairs.push({ email: e, password: p });
     }
 
-    /**
-     * 复制 API Key
-     */
-    private async _copyApiKey(accountId: string) {
-        const account = await this._accountManager.getAccount(accountId);
-        if (!account) {
-            this._sendMessage('error', '账号不存在');
-            return;
-        }
+    return { isBatch: true, pairs, invalidSegments };
+  }
 
-        await vscode.env.clipboard.writeText(account.apiKey);
-        this._sendMessage('success', 'API Key 已复制');
+  /**
+   * 删除账号
+   */
+  private async _deleteAccount(accountId: string) {
+    const account = await this._accountManager.getAccount(accountId);
+    if (!account) {
+      this._sendMessage('error', '账号不存在');
+      return;
     }
 
-    /**
-     * 发送消息到 WebView
-     */
-    private _sendMessage(msgType: 'info' | 'success' | 'error', text: string) {
-        if (this._view) {
-            this._view.webview.postMessage({ type: 'message', msgType, text });
-        }
+    await this._accountManager.removeAccount(accountId);
+    this._sendMessage('success', `账号 ${account.email} 已删除`);
+    await this._sendAccountList();
+  }
+
+  /**
+   * 复制 API Key
+   */
+  private async _copyApiKey(accountId: string) {
+    const account = await this._accountManager.getAccount(accountId);
+    if (!account) {
+      this._sendMessage('error', '账号不存在');
+      return;
     }
 
-    /**
-     * 生成 WebView HTML
-     */
-    private _getHtmlForWebview(webview: vscode.Webview): string {
-        return `<!DOCTYPE html>
+    await vscode.env.clipboard.writeText(account.apiKey);
+    this._sendMessage('success', 'API Key 已复制');
+  }
+
+  /**
+   * 发送消息到 WebView
+   */
+  private _sendMessage(msgType: 'info' | 'success' | 'error', text: string) {
+    if (this._view) {
+      this._view.webview.postMessage({ type: 'message', msgType, text });
+    }
+  }
+
+  /**
+   * 生成 WebView HTML
+   */
+  private _getHtmlForWebview(webview: vscode.Webview): string {
+    return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -584,8 +674,15 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     function submitAdd() {
       const email = document.getElementById('emailInput').value.trim();
       const password = document.getElementById('passwordInput').value;
+      const passwordTrimmed = (password || '').trim();
+      const looksBatch = email.includes(';') || email.includes('；') || ((email.includes(',') || email.includes('，')) && !passwordTrimmed);
       
-      if (!email || !password) {
+      if (!email) {
+        showMessage('error', '请输入邮箱');
+        return;
+      }
+
+      if (!looksBatch && !passwordTrimmed) {
         showMessage('error', '请输入邮箱和密码');
         return;
       }
@@ -630,5 +727,5 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
   </script>
 </body>
 </html>`;
-    }
+  }
 }
