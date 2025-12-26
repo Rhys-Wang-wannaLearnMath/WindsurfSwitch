@@ -1,0 +1,85 @@
+{
+  "name": "windsurf-SWITCH",
+  "displayName": "Windsurf 无感换号",
+  "description": "Windsurf 账号无感切换工具",
+  "version": "1.0.0",
+  "publisher": "your-publisher-name",
+  "repository": {
+    "url": "https://github.com/crispvibe/WindsurSwitch",
+    "type": "git"
+  },
+  "engines": {
+    "vscode": "^1.71.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "windsurfSwitch",
+          "title": "Windsurf 无感换号",
+          "icon": "resources/windsurf-icon.png"
+        }
+      ]
+    },
+    "views": {
+      "windsurfSwitch": [
+        {
+          "type": "webview",
+          "id": "windsurfSwitch.accountPanel",
+          "name": "账号管理"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "windsurf-SWITCH.refresh",
+        "title": "刷新面板",
+        "category": "Windsurf 无感换号"
+      },
+      {
+        "command": "windsurf-SWITCH.switchNext",
+        "title": "切换下一个账号",
+        "category": "Windsurf 无感换号"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "windsurf-SWITCH.switchNext",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "webpack --mode development --config ./webpack/extension.config.js",
+    "watch": "webpack --mode development --watch --config ./webpack/extension.config.js",
+    "build": "npm run clean && webpack --mode production --config ./webpack/extension.config.js",
+    "package": "vsce package --no-dependencies",
+    "lint": "eslint src --ext ts",
+    "clean": "rimraf dist out *.tsbuildinfo"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "16.x",
+    "@types/uuid": "^9.0.0",
+    "@types/vscode": "^1.71.0",
+    "@typescript-eslint/eslint-plugin": "^5.31.0",
+    "@typescript-eslint/parser": "^5.31.0",
+    "@vscode/vsce": "^3.7.0",
+    "eslint": "^8.20.0",
+    "rimraf": "^3.0.2",
+    "ts-loader": "^9.4.1",
+    "typescript": "^4.7.4",
+    "webpack": "^5.97.1",
+    "webpack-cli": "^5.1.4"
+  }
+}
