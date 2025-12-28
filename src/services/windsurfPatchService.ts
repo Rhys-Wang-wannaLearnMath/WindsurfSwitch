@@ -33,6 +33,190 @@ export class WindsurfPatchService {
     // 新的命令注册
     private static readonly NEW_COMMAND_REGISTRATION = 'A.subscriptions.push(s.commands.registerCommand("windsurf.provideAuthTokenToAuthProviderWithShit",async A=>{try{return{session:await e.handleAuthTokenWithShit(A),error:void 0}}catch(A){return A instanceof a.WindsurfError?{error:A.errorMetadata}:{error:C.WindsurfExtensionMetadata.getInstance().errorCodes.GENERIC_ERROR}}})),';
 
+    private static findMatchingParen(source: string, openParenIndex: number): number {
+        let depth = 0;
+        let inSingle = false;
+        let inDouble = false;
+        let inTemplate = false;
+        let escaped = false;
+
+        for (let i = openParenIndex; i < source.length; i++) {
+            const ch = source[i];
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (ch === '\\') {
+                escaped = true;
+                continue;
+            }
+
+            if (inSingle) {
+                if (ch === "'") inSingle = false;
+                continue;
+            }
+            if (inDouble) {
+                if (ch === '"') inDouble = false;
+                continue;
+            }
+            if (inTemplate) {
+                if (ch === '`') inTemplate = false;
+                continue;
+            }
+
+            if (ch === "'") {
+                inSingle = true;
+                continue;
+            }
+            if (ch === '"') {
+                inDouble = true;
+                continue;
+            }
+            if (ch === '`') {
+                inTemplate = true;
+                continue;
+            }
+
+            if (ch === '(') depth++;
+            else if (ch === ')') {
+                depth--;
+                if (depth === 0) return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static findMatchingBrace(source: string, openBraceIndex: number): number {
+        let depth = 0;
+        let inSingle = false;
+        let inDouble = false;
+        let inTemplate = false;
+        let escaped = false;
+
+        for (let i = openBraceIndex; i < source.length; i++) {
+            const ch = source[i];
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (ch === '\\') {
+                escaped = true;
+                continue;
+            }
+
+            if (inSingle) {
+                if (ch === "'") inSingle = false;
+                continue;
+            }
+            if (inDouble) {
+                if (ch === '"') inDouble = false;
+                continue;
+            }
+            if (inTemplate) {
+                if (ch === '`') inTemplate = false;
+                continue;
+            }
+
+            if (ch === "'") {
+                inSingle = true;
+                continue;
+            }
+            if (ch === '"') {
+                inDouble = true;
+                continue;
+            }
+            if (ch === '`') {
+                inTemplate = true;
+                continue;
+            }
+
+            if (ch === '{') depth++;
+            else if (ch === '}') {
+                depth--;
+                if (depth === 0) return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static tryInsertHandleAuthTokenFallback(fileContent: string): { updated: boolean; content: string } {
+        const matchIndex = fileContent.indexOf('async handleAuthToken(');
+        if (matchIndex === -1) {
+            return { updated: false, content: fileContent };
+        }
+
+        const openBraceIndex = fileContent.indexOf('{', matchIndex);
+        if (openBraceIndex === -1) {
+            return { updated: false, content: fileContent };
+        }
+
+        const closeBraceIndex = this.findMatchingBrace(fileContent, openBraceIndex);
+        if (closeBraceIndex === -1) {
+            return { updated: false, content: fileContent };
+        }
+
+        const insertPosition = closeBraceIndex + 1;
+        const updatedContent =
+            fileContent.substring(0, insertPosition) +
+            this.NEW_HANDLE_AUTH_TOKEN_WITH_SHIT +
+            fileContent.substring(insertPosition);
+
+        return { updated: true, content: updatedContent };
+    }
+
+    private static findCommandRegistrationPushCall(fileContent: string): { openParenIndex: number; closeParenIndex: number; args: string } | null {
+        let searchIndex = 0;
+        while (true) {
+            const pushStart = fileContent.indexOf('.subscriptions.push(', searchIndex);
+            if (pushStart === -1) return null;
+
+            const openParenIndex = fileContent.indexOf('(', pushStart);
+            if (openParenIndex === -1) return null;
+
+            const closeParenIndex = this.findMatchingParen(fileContent, openParenIndex);
+            if (closeParenIndex === -1) return null;
+
+            const args = fileContent.substring(openParenIndex + 1, closeParenIndex);
+            if (args.includes('.commands.registerCommand') && args.includes('handleAuthToken')) {
+                return { openParenIndex, closeParenIndex, args };
+            }
+
+            searchIndex = closeParenIndex + 1;
+        }
+    }
+
+    private static tryInsertCommandRegistrationFallback(fileContent: string): { updated: boolean; content: string } {
+        const pushCall = this.findCommandRegistrationPushCall(fileContent);
+        if (!pushCall) {
+            return { updated: false, content: fileContent };
+        }
+
+        const vscodeVarMatch = pushCall.args.match(/\b([A-Za-z_$][\w$]*)\.commands\.registerCommand\b/);
+        const authVarMatch = pushCall.args.match(/\b([A-Za-z_$][\w$]*)\.handleAuthToken\(/);
+        if (!vscodeVarMatch || !authVarMatch) {
+            return { updated: false, content: fileContent };
+        }
+
+        const vscodeVar = vscodeVarMatch[1];
+        const authVar = authVarMatch[1];
+
+        const injected = `${vscodeVar}.commands.registerCommand("${this.PATCH_KEYWORD_1}",async A=>await ${authVar}.handleAuthTokenWithShit(A))`;
+
+        const updatedContent =
+            fileContent.substring(0, pushCall.closeParenIndex) +
+            ',' +
+            injected +
+            fileContent.substring(pushCall.closeParenIndex);
+
+        return { updated: true, content: updatedContent };
+    }
+
     /**
      * 检查补丁是否已应用
      * @returns 是否已应用补丁
@@ -153,42 +337,64 @@ export class WindsurfPatchService {
             console.log(`[WindsurfPatchService] 原始文件大小: ${fileContent.length} 字符`);
 
             // 1. 添加新的 handleAuthTokenWithShit 函数
-            console.log('[WindsurfPatchService] 查找 handleAuthToken 函数...');
-            const handleAuthTokenIndex = fileContent.indexOf(this.ORIGINAL_HANDLE_AUTH_TOKEN);
-            if (handleAuthTokenIndex === -1) {
-                console.error('[WindsurfPatchService] 未找到 handleAuthToken 函数');
-                return {
-                    success: false,
-                    error: "Could not find handleAuthToken function. Windsurf version may be incompatible.\n\nThe expected function signature was not found in extension.js."
-                };
-            }
-            console.log(`[WindsurfPatchService] 找到 handleAuthToken 函数，位置: ${handleAuthTokenIndex}`);
+            if (!fileContent.includes(this.PATCH_KEYWORD_2)) {
+                console.log('[WindsurfPatchService] 查找 handleAuthToken 函数...');
+                const handleAuthTokenIndex = fileContent.indexOf(this.ORIGINAL_HANDLE_AUTH_TOKEN);
+                if (handleAuthTokenIndex !== -1) {
+                    console.log(`[WindsurfPatchService] 找到 handleAuthToken 函数（精确匹配），位置: ${handleAuthTokenIndex}`);
 
-            const insertPosition1 = handleAuthTokenIndex + this.ORIGINAL_HANDLE_AUTH_TOKEN.length;
-            console.log('[WindsurfPatchService] 插入新的 handleAuthTokenWithShit 函数...');
-            fileContent = fileContent.substring(0, insertPosition1) +
-                this.NEW_HANDLE_AUTH_TOKEN_WITH_SHIT +
-                fileContent.substring(insertPosition1);
-            console.log(`[WindsurfPatchService] 插入函数后文件大小: ${fileContent.length} 字符`);
+                    const insertPosition1 = handleAuthTokenIndex + this.ORIGINAL_HANDLE_AUTH_TOKEN.length;
+                    console.log('[WindsurfPatchService] 插入新的 handleAuthTokenWithShit 函数...');
+                    fileContent = fileContent.substring(0, insertPosition1) +
+                        this.NEW_HANDLE_AUTH_TOKEN_WITH_SHIT +
+                        fileContent.substring(insertPosition1);
+                    console.log(`[WindsurfPatchService] 插入函数后文件大小: ${fileContent.length} 字符`);
+                } else {
+                    console.log('[WindsurfPatchService] 精确匹配失败，尝试兼容模式插入 handleAuthTokenWithShit...');
+                    const fallback = this.tryInsertHandleAuthTokenFallback(fileContent);
+                    if (!fallback.updated) {
+                        console.error('[WindsurfPatchService] 未找到 handleAuthToken 函数');
+                        return {
+                            success: false,
+                            error: "Could not find handleAuthToken function. Windsurf version may be incompatible.\n\nThe expected function signature was not found in extension.js."
+                        };
+                    }
+                    fileContent = fallback.content;
+                    console.log(`[WindsurfPatchService] 兼容模式插入函数后文件大小: ${fileContent.length} 字符`);
+                }
+            } else {
+                console.log('[WindsurfPatchService] handleAuthTokenWithShit 已存在，跳过插入函数');
+            }
 
             // 2. 添加新的命令注册
-            console.log('[WindsurfPatchService] 查找命令注册...');
-            const commandRegistrationIndex = fileContent.indexOf(this.ORIGINAL_COMMAND_REGISTRATION);
-            if (commandRegistrationIndex === -1) {
-                console.error('[WindsurfPatchService] 未找到命令注册');
-                return {
-                    success: false,
-                    error: "Could not find PROVIDE_AUTH_TOKEN_TO_AUTH_PROVIDER command registration. Windsurf version may be incompatible.\n\nThe expected command registration was not found in extension.js."
-                };
-            }
-            console.log(`[WindsurfPatchService] 找到命令注册，位置: ${commandRegistrationIndex}`);
+            if (!fileContent.includes(this.PATCH_KEYWORD_1)) {
+                console.log('[WindsurfPatchService] 查找命令注册...');
+                const commandRegistrationIndex = fileContent.indexOf(this.ORIGINAL_COMMAND_REGISTRATION);
+                if (commandRegistrationIndex !== -1) {
+                    console.log(`[WindsurfPatchService] 找到命令注册（精确匹配），位置: ${commandRegistrationIndex}`);
 
-            const insertPosition2 = commandRegistrationIndex + this.ORIGINAL_COMMAND_REGISTRATION.length;
-            console.log('[WindsurfPatchService] 插入新的命令注册...');
-            fileContent = fileContent.substring(0, insertPosition2) +
-                this.NEW_COMMAND_REGISTRATION +
-                fileContent.substring(insertPosition2);
-            console.log(`[WindsurfPatchService] 插入命令后文件大小: ${fileContent.length} 字符`);
+                    const insertPosition2 = commandRegistrationIndex + this.ORIGINAL_COMMAND_REGISTRATION.length;
+                    console.log('[WindsurfPatchService] 插入新的命令注册...');
+                    fileContent = fileContent.substring(0, insertPosition2) +
+                        this.NEW_COMMAND_REGISTRATION +
+                        fileContent.substring(insertPosition2);
+                    console.log(`[WindsurfPatchService] 插入命令后文件大小: ${fileContent.length} 字符`);
+                } else {
+                    console.log('[WindsurfPatchService] 精确匹配失败，尝试兼容模式插入命令注册...');
+                    const fallback = this.tryInsertCommandRegistrationFallback(fileContent);
+                    if (!fallback.updated) {
+                        console.error('[WindsurfPatchService] 未找到可插入命令注册的位置');
+                        return {
+                            success: false,
+                            error: "Could not find PROVIDE_AUTH_TOKEN_TO_AUTH_PROVIDER command registration. Windsurf version may be incompatible.\n\nThe expected command registration was not found in extension.js."
+                        };
+                    }
+                    fileContent = fallback.content;
+                    console.log(`[WindsurfPatchService] 兼容模式插入命令后文件大小: ${fileContent.length} 字符`);
+                }
+            } else {
+                console.log('[WindsurfPatchService] windsurf.provideAuthTokenToAuthProviderWithShit 已存在，跳过插入命令');
+            }
 
             // 写入修改后的文件
             console.log('[WindsurfPatchService] 写入修改后的文件...');

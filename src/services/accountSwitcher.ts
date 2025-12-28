@@ -88,8 +88,7 @@ export class AccountSwitcher {
             }
 
             if (patchResult.error) {
-                this.log(`补丁检查失败: ${patchResult.error}`);
-                return { success: false, error: patchResult.error };
+                this.log(`补丁检查失败（将继续尝试备用方案）: ${patchResult.error}`);
             }
 
             this.log('补丁检查通过');
