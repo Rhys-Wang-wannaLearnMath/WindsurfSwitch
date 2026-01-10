@@ -6,6 +6,93 @@
 
 import * as https from 'https';
 
+function encodeVarint(value: number): Buffer {
+    const bytes: number[] = [];
+    let v = value >>> 0;
+    while (v >= 0x80) {
+        bytes.push((v & 0x7f) | 0x80);
+        v >>>= 7;
+    }
+    bytes.push(v);
+    return Buffer.from(bytes);
+}
+
+function decodeVarint(buf: Buffer, offset: number): { value: number; nextOffset: number } {
+    let result = 0;
+    let shift = 0;
+    let i = offset;
+    while (i < buf.length) {
+        const b = buf[i];
+        result |= (b & 0x7f) << shift;
+        i++;
+        if ((b & 0x80) === 0) {
+            return { value: result >>> 0, nextOffset: i };
+        }
+        shift += 7;
+        if (shift > 35) {
+            throw new Error('Invalid varint');
+        }
+    }
+    throw new Error('Truncated varint');
+}
+
+function encodeProtoStringField(fieldNo: number, value: string): Buffer {
+    const tag = (fieldNo << 3) | 2;
+    const tagBuf = encodeVarint(tag);
+    const valueBuf = Buffer.from(value, 'utf8');
+    const lenBuf = encodeVarint(valueBuf.length);
+    return Buffer.concat([tagBuf, lenBuf, valueBuf]);
+}
+
+function parseProtoStringFields(buf: Buffer): Record<number, string> {
+    const out: Record<number, string> = {};
+    let off = 0;
+
+    while (off < buf.length) {
+        const tagInfo = decodeVarint(buf, off);
+        const tag = tagInfo.value;
+        off = tagInfo.nextOffset;
+
+        const fieldNo = tag >>> 3;
+        const wireType = tag & 0x7;
+
+        if (wireType === 2) {
+            const lenInfo = decodeVarint(buf, off);
+            const len = lenInfo.value;
+            off = lenInfo.nextOffset;
+            const end = off + len;
+            if (end > buf.length) {
+                throw new Error('Truncated length-delimited field');
+            }
+
+            const slice = buf.subarray(off, end);
+            out[fieldNo] = slice.toString('utf8');
+            off = end;
+            continue;
+        }
+
+        if (wireType === 0) {
+            const v = decodeVarint(buf, off);
+            off = v.nextOffset;
+            continue;
+        }
+
+        if (wireType === 5) {
+            off += 4;
+            continue;
+        }
+
+        if (wireType === 1) {
+            off += 8;
+            continue;
+        }
+
+        throw new Error(`Unsupported wire type: ${wireType}`);
+    }
+
+    return out;
+}
+
 /**
  * API 常量配置
  */
@@ -68,16 +155,29 @@ async function httpPost(url: string, data: any, headers: Record<string, string> 
             });
 
             res.on('end', () => {
+                let json: any = undefined;
                 try {
-                    const json = JSON.parse(body);
-                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                        resolve(json);
-                    } else {
-                        reject(new Error(json.error?.message || `HTTP ${res.statusCode}`));
-                    }
+                    json = JSON.parse(body);
                 } catch {
-                    reject(new Error(`Invalid JSON response: ${body.substring(0, 100)}`));
+                    json = undefined;
                 }
+
+                const statusCode = res.statusCode || 0;
+                const isOk = statusCode >= 200 && statusCode < 300;
+
+                if (isOk) {
+                    if (json !== undefined) {
+                        resolve(json);
+                        return;
+                    }
+                    reject(new Error(`Invalid JSON response: ${body.substring(0, 200)}`));
+                    return;
+                }
+
+                const messageFromJson = json?.error?.message || json?.message || json?.error || undefined;
+                const messageFromBody = body ? body.substring(0, 200) : '';
+                const message = messageFromJson || messageFromBody || `HTTP ${statusCode}`;
+                reject(new Error(`${message} (HTTP ${statusCode})`));
             });
         });
 
@@ -91,6 +191,60 @@ async function httpPost(url: string, data: any, headers: Record<string, string> 
         });
 
         req.write(postData);
+        req.end();
+    });
+}
+
+async function httpPostProto(url: string, data: Buffer, headers: Record<string, string> = {}): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const urlObj = new URL(url);
+
+        const options = {
+            hostname: urlObj.hostname,
+            port: urlObj.port || 443,
+            path: urlObj.pathname + urlObj.search,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/proto',
+                'Content-Length': data.length,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                ...headers
+            },
+            timeout: CONSTANTS.REQUEST_TIMEOUT
+        };
+
+        const req = https.request(options, (res) => {
+            const chunks: Buffer[] = [];
+
+            res.on('data', (chunk) => {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            });
+
+            res.on('end', () => {
+                const body = Buffer.concat(chunks);
+                const statusCode = res.statusCode || 0;
+                const isOk = statusCode >= 200 && statusCode < 300;
+
+                if (isOk) {
+                    resolve(body);
+                    return;
+                }
+
+                const preview = body.length ? body.subarray(0, 200).toString('utf8') : '';
+                reject(new Error(`${preview || 'HTTP ' + statusCode} (HTTP ${statusCode})`));
+            });
+        });
+
+        req.on('error', (error) => {
+            reject(error);
+        });
+
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request timeout'));
+        });
+
+        req.write(data);
         req.end();
     });
 }
@@ -129,14 +283,23 @@ export class ApiHelper {
                 {
                     email: email,
                     password: password,
-                    api_key: CONSTANTS.FIREBASE_API_KEY
+                    api_key: CONSTANTS.FIREBASE_API_KEY,
+                    apiKey: CONSTANTS.FIREBASE_API_KEY
                 }
             );
 
+            const idToken = response.idToken ?? response.id_token;
+            const refreshToken = response.refreshToken ?? response.refresh_token;
+            const expiresInRaw = response.expiresIn ?? response.expires_in;
+
+            if (!idToken || typeof idToken !== 'string' || idToken.length < 20) {
+                throw new Error('登录服务返回异常：缺少有效的 idToken');
+            }
+
             return {
-                idToken: response.idToken,
-                refreshToken: response.refreshToken,
-                expiresIn: parseInt(response.expiresIn || '3600')
+                idToken,
+                refreshToken: refreshToken || '',
+                expiresIn: parseInt(expiresInRaw || '3600')
             };
         } catch (error) {
             const err = error as Error;
@@ -168,23 +331,44 @@ export class ApiHelper {
         apiServerUrl: string;
     }> {
         try {
-            const response = await httpPost(
+            if (!idToken) {
+                throw new Error('无法获取 API Key：idToken 为空');
+            }
+
+            const requestBody = encodeProtoStringField(1, idToken);
+            const responseBody = await httpPostProto(
                 CONSTANTS.WINDSURF_REGISTER_API,
+                requestBody,
                 {
-                    firebase_id_token: idToken
+                    'connect-protocol-version': '1',
+                    'connect-timeout-ms': String(CONSTANTS.REQUEST_TIMEOUT),
+                    'accept': 'application/proto'
                 }
             );
 
+            const fields = parseProtoStringFields(responseBody);
+            const apiKey = fields[1];
+            const name = fields[2];
+            const apiServerUrl = fields[3];
+
+            if (!apiKey || !name) {
+                throw new Error('Auth login failure: empty apiKey or name');
+            }
+
             return {
-                apiKey: response.api_key,
-                name: response.name,
-                apiServerUrl: response.api_server_url
+                apiKey,
+                name,
+                apiServerUrl: apiServerUrl || 'https://server.self-serve.windsurf.com'
             };
         } catch (error) {
             const err = error as Error;
 
             if (err.message.includes('ENOTFOUND') || err.message.includes('ETIMEDOUT')) {
                 throw new Error('无法连接到 Windsurf 服务器');
+            }
+
+            if (err.message.includes('HTTP 401') || err.message.toLowerCase().includes('unauthenticated') || err.message.toLowerCase().includes('invalid auth token')) {
+                throw new Error(`获取 API Key 失败（401 未授权）。服务端返回：${err.message}`);
             }
 
             throw err;
