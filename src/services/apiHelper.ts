@@ -97,8 +97,8 @@ function parseProtoStringFields(buf: Buffer): Record<number, string> {
  * API 常量配置
  */
 const CONSTANTS = {
-    // Cloudflare Worker 中转地址
-    WORKER_URL: 'https://windsurf.hfhddfj.cn',
+    // Firebase Identity Toolkit API (直接调用，无需中转)
+    FIREBASE_AUTH_URL: 'https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword',
 
     // Firebase API Key
     FIREBASE_API_KEY: 'AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY',
@@ -132,6 +132,14 @@ async function httpPost(url: string, data: any, headers: Record<string, string> 
     return new Promise((resolve, reject) => {
         const urlObj = new URL(url);
         const postData = JSON.stringify(data);
+        let settled = false;
+
+        const settle = (fn: () => void) => {
+            if (!settled) {
+                settled = true;
+                fn();
+            }
+        };
 
         const options = {
             hostname: urlObj.hostname,
@@ -143,8 +151,7 @@ async function httpPost(url: string, data: any, headers: Record<string, string> 
                 'Content-Length': Buffer.byteLength(postData),
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 ...headers
-            },
-            timeout: CONSTANTS.REQUEST_TIMEOUT
+            }
         };
 
         const req = https.request(options, (res) => {
@@ -167,27 +174,34 @@ async function httpPost(url: string, data: any, headers: Record<string, string> 
 
                 if (isOk) {
                     if (json !== undefined) {
-                        resolve(json);
+                        settle(() => resolve(json));
                         return;
                     }
-                    reject(new Error(`Invalid JSON response: ${body.substring(0, 200)}`));
+                    settle(() => reject(new Error(`Invalid JSON response: ${body.substring(0, 200)}`)));
                     return;
                 }
 
                 const messageFromJson = json?.error?.message || json?.message || json?.error || undefined;
                 const messageFromBody = body ? body.substring(0, 200) : '';
                 const message = messageFromJson || messageFromBody || `HTTP ${statusCode}`;
-                reject(new Error(`${message} (HTTP ${statusCode})`));
+                settle(() => reject(new Error(`${message} (HTTP ${statusCode})`)));
             });
         });
 
-        req.on('error', (error) => {
-            reject(error);
+        req.setTimeout(CONSTANTS.REQUEST_TIMEOUT, () => {
+            req.destroy();
+            settle(() => reject(new Error('Request timeout')));
         });
 
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('Request timeout'));
+        req.on('error', (error) => {
+            settle(() => reject(error));
+        });
+
+        req.on('socket', (socket) => {
+            socket.on('error', (err) => {
+                req.destroy();
+                settle(() => reject(new Error(`Socket error: ${err.message}`)));
+            });
         });
 
         req.write(postData);
@@ -198,6 +212,14 @@ async function httpPost(url: string, data: any, headers: Record<string, string> 
 async function httpPostProto(url: string, data: Buffer, headers: Record<string, string> = {}): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const urlObj = new URL(url);
+        let settled = false;
+
+        const settle = (fn: () => void) => {
+            if (!settled) {
+                settled = true;
+                fn();
+            }
+        };
 
         const options = {
             hostname: urlObj.hostname,
@@ -209,8 +231,7 @@ async function httpPostProto(url: string, data: Buffer, headers: Record<string, 
                 'Content-Length': data.length,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 ...headers
-            },
-            timeout: CONSTANTS.REQUEST_TIMEOUT
+            }
         };
 
         const req = https.request(options, (res) => {
@@ -226,22 +247,29 @@ async function httpPostProto(url: string, data: Buffer, headers: Record<string, 
                 const isOk = statusCode >= 200 && statusCode < 300;
 
                 if (isOk) {
-                    resolve(body);
+                    settle(() => resolve(body));
                     return;
                 }
 
                 const preview = body.length ? body.subarray(0, 200).toString('utf8') : '';
-                reject(new Error(`${preview || 'HTTP ' + statusCode} (HTTP ${statusCode})`));
+                settle(() => reject(new Error(`${preview || 'HTTP ' + statusCode} (HTTP ${statusCode})`)));
             });
         });
 
-        req.on('error', (error) => {
-            reject(error);
+        req.setTimeout(CONSTANTS.REQUEST_TIMEOUT, () => {
+            req.destroy();
+            settle(() => reject(new Error('Request timeout')));
         });
 
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('Request timeout'));
+        req.on('error', (error) => {
+            settle(() => reject(error));
+        });
+
+        req.on('socket', (socket) => {
+            socket.on('error', (err) => {
+                req.destroy();
+                settle(() => reject(new Error(`Socket error: ${err.message}`)));
+            });
         });
 
         req.write(data);
@@ -279,18 +307,17 @@ export class ApiHelper {
     }> {
         try {
             const response = await httpPost(
-                `${CONSTANTS.WORKER_URL}/login`,
+                `${CONSTANTS.FIREBASE_AUTH_URL}?key=${CONSTANTS.FIREBASE_API_KEY}`,
                 {
                     email: email,
                     password: password,
-                    api_key: CONSTANTS.FIREBASE_API_KEY,
-                    apiKey: CONSTANTS.FIREBASE_API_KEY
+                    returnSecureToken: true
                 }
             );
 
-            const idToken = response.idToken ?? response.id_token;
-            const refreshToken = response.refreshToken ?? response.refresh_token;
-            const expiresInRaw = response.expiresIn ?? response.expires_in;
+            const idToken = response.idToken;
+            const refreshToken = response.refreshToken;
+            const expiresIn = response.expiresIn;
 
             if (!idToken || typeof idToken !== 'string' || idToken.length < 20) {
                 throw new Error('登录服务返回异常：缺少有效的 idToken');
@@ -299,13 +326,13 @@ export class ApiHelper {
             return {
                 idToken,
                 refreshToken: refreshToken || '',
-                expiresIn: parseInt(expiresInRaw || '3600')
+                expiresIn: parseInt(expiresIn || '3600')
             };
         } catch (error) {
             const err = error as Error;
 
             if (err.message.includes('ENOTFOUND') || err.message.includes('ETIMEDOUT') || err.message.includes('ECONNREFUSED')) {
-                throw new Error('无法连接到中转服务器，请检查网络连接');
+                throw new Error('无法连接到 Firebase 服务器，请检查网络连接');
             }
 
             if (err.message.includes('EMAIL_NOT_FOUND')) {
@@ -425,11 +452,10 @@ export class ApiHelper {
     }> {
         try {
             const response = await httpPost(
-                CONSTANTS.WORKER_URL,
+                `https://securetoken.googleapis.com/v1/token?key=${CONSTANTS.FIREBASE_API_KEY}`,
                 {
                     grant_type: 'refresh_token',
-                    refresh_token: refreshToken,
-                    api_key: CONSTANTS.FIREBASE_API_KEY
+                    refresh_token: refreshToken
                 }
             );
 
