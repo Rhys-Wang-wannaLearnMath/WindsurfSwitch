@@ -3,15 +3,15 @@ const webpack = require('webpack');
 
 module.exports = (env, argv) => {
     const isProduction = argv.mode === 'production';
-    
+
     const plugins = [
         new webpack.DefinePlugin({
             'process.env.NODE_ENV': JSON.stringify(isProduction ? 'production' : 'development')
         })
     ];
-    
+
     // 混淆将在构建后通过 javascript-obfuscator CLI 完成
-    
+
     return {
         target: 'node',
         mode: isProduction ? 'production' : 'development',
@@ -23,7 +23,8 @@ module.exports = (env, argv) => {
             clean: true
         },
         externals: {
-            vscode: 'commonjs vscode'
+            vscode: 'commonjs vscode',
+            'sql.js': 'commonjs sql.js'
         },
         resolve: {
             extensions: ['.ts', '.js']

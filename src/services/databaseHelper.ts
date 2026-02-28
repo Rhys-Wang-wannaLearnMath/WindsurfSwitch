@@ -29,9 +29,24 @@ async function initSqlJs(): Promise<SqlJs> {
     }
 
     // 动态导入 sql.js
-    const initSqlJsModule = require('sql.js');
-    sqlJsInstance = await initSqlJsModule();
-    return sqlJsInstance!;
+    try {
+        console.log('[DatabaseHelper] 正在加载 sql.js 模块...');
+        const sqlJsModule = require('sql.js');
+        console.log('[DatabaseHelper] sql.js 模块类型:', typeof sqlJsModule, '键:', Object.keys(sqlJsModule || {}).join(','));
+        // 兼容 CommonJS default export 和 ESM interop
+        const initFn = typeof sqlJsModule === 'function' ? sqlJsModule : (sqlJsModule.default || sqlJsModule);
+        if (typeof initFn !== 'function') {
+            throw new Error(`sql.js 导出不是函数, 类型: ${typeof initFn}`);
+        }
+        sqlJsInstance = await initFn();
+        console.log('[DatabaseHelper] sql.js 初始化完成');
+        return sqlJsInstance!;
+    } catch (error) {
+        const err = error as Error;
+        console.error('[DatabaseHelper] sql.js 加载/初始化失败:', err.message);
+        console.error('[DatabaseHelper] sql.js 堆栈:', err.stack || '无');
+        throw new Error(`sql.js 加载失败: ${err.message}`);
+    }
 }
 
 /**

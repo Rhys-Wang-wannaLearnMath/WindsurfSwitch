@@ -130,12 +130,23 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     }
 
     this._sendMessage('info', '正在切换账号...');
-    const result = await this._accountSwitcher.switchAccount(account);
 
-    if (result.success) {
-      this._sendMessage('success', '切换成功，窗口即将重载...');
-    } else {
-      this._sendMessage('error', `切换失败: ${result.error}`);
+    try {
+      const result = await this._accountSwitcher.switchAccount(account);
+
+      if (result.needsRestart) {
+        this._sendMessage('info', '补丁已应用，正在重启 Windsurf...');
+      } else if (result.success && result.method === 'injection') {
+        this._sendMessage('success', '切换成功（补丁注入），窗口即将重载...');
+      } else if (result.method === 'fallback') {
+        this._sendMessage('error', `注入未成功，已尝试备用方案。请查看「Windsurf 换号」输出面板获取详细日志。`);
+      } else {
+        this._sendMessage('error', `切换失败: ${result.error || '未知错误'}`);
+      }
+    } catch (error) {
+      const msg = (error as Error).message;
+      this._sendMessage('error', `切换异常: ${msg}`);
+      this._accountSwitcher.showLog();
     }
   }
 

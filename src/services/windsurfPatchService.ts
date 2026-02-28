@@ -17,21 +17,11 @@ export interface PermissionCheckResult {
 }
 
 export class WindsurfPatchService {
-    // 检测关键字 - 用于验证补丁是否已应用
+    // 检测关键字
     private static readonly PATCH_KEYWORD_1 = "windsurf.provideAuthTokenToAuthProviderWithShit";
     private static readonly PATCH_KEYWORD_2 = "handleAuthTokenWithShit";
-
-    // 原始的 handleAuthToken 函数 (Windsurf 1.106.0)
-    private static readonly ORIGINAL_HANDLE_AUTH_TOKEN = 'async handleAuthToken(A){const e=await(0,E.registerUser)(A),{apiKey:t,name:i}=e,g=(0,B.getApiServerUrl)(e.apiServerUrl);if(!t)throw new s.AuthMalformedLanguageServerResponseError("Auth login failure: empty api_key");if(!i)throw new s.AuthMalformedLanguageServerResponseError("Auth login failure: empty name");const I={id:(0,n.v4)(),accessToken:t,account:{label:i,id:i},scopes:[]};return await this.context.secrets.store(u.sessionsSecretKey,JSON.stringify([I])),await this.context.globalState.update("apiServerUrl",g),(0,o.isString)(g)&&!(0,o.isEmpty)(g)&&g!==r.LanguageServerClient.getInstance().apiServerUrl&&await r.LanguageServerClient.getInstance().restart(g),this._sessionChangeEmitter.fire({added:[I],removed:[],changed:[]}),I}';
-
-    // 新的 handleAuthTokenWithShit 函数 (Windsurf 1.106.0)
-    private static readonly NEW_HANDLE_AUTH_TOKEN_WITH_SHIT = 'async handleAuthTokenWithShit(A){const{apiKey:t,name:g}=A,i=(0,B.getApiServerUrl)(A.apiServerUrl);if(!t)throw new s.AuthMalformedLanguageServerResponseError("Auth login failure: empty api_key");if(!g)throw new s.AuthMalformedLanguageServerResponseError("Auth login failure: empty name");const I={id:(0,n.v4)(),accessToken:t,account:{label:g,id:g},scopes:[]};return await this.context.secrets.store(u.sessionsSecretKey,JSON.stringify([I])),await this.context.globalState.update("apiServerUrl",i),(0,o.isString)(i)&&!(0,o.isEmpty)(i)&&i!==r.LanguageServerClient.getInstance().apiServerUrl&&await r.LanguageServerClient.getInstance().restart(i),this._sessionChangeEmitter.fire({added:[I],removed:[],changed:[]}),I}';
-
-    // 原始的命令注册
-    private static readonly ORIGINAL_COMMAND_REGISTRATION = "A.subscriptions.push(s.commands.registerCommand(t.PROVIDE_AUTH_TOKEN_TO_AUTH_PROVIDER,async A=>{try{return{session:await e.handleAuthToken(A),error:void 0}}catch(A){return A instanceof a.WindsurfError?{error:A.errorMetadata}:{error:C.WindsurfExtensionMetadata.getInstance().errorCodes.GENERIC_ERROR}}}),s.commands.registerCommand(t.LOGIN_WITH_REDIRECT,async(A,e)=>{(N||S)&&await G(),N=void 0;const t=(0,m.getAuthSession)({promptLoginIfNone:!0,shouldRegisterNewUser:A,fromOnboarding:e}).catch(A=>{if(!k(A))throw(0,u.sentryCaptureException)(A),console.error(\"Error during login with redirect:\",A),A});N=t;try{return await t}finally{N===t&&(N=void 0)}}),s.commands.registerCommand(t.LOGIN_WITH_AUTH_TOKEN,(acc)=>{acc?e.handleAuthToken(acc):e.provideAuthToken()}),s.commands.registerCommand(t.CANCEL_LOGIN,()=>G()),s.commands.registerCommand(t.LOGOUT,async()=>{const A=w.WindsurfAuthProvider.getInstance(),e=await A.getSessions();e.length>0&&await A.removeSession(e[0].id)})),";
-
-    // 新的命令注册
-    private static readonly NEW_COMMAND_REGISTRATION = 'A.subscriptions.push(s.commands.registerCommand("windsurf.provideAuthTokenToAuthProviderWithShit",async A=>{try{return{session:await e.handleAuthTokenWithShit(A),error:void 0}}catch(A){return A instanceof a.WindsurfError?{error:A.errorMetadata}:{error:C.WindsurfExtensionMetadata.getInstance().errorCodes.GENERIC_ERROR}}})),';
+    // 版本标记 - 用于检测补丁是否需要更新
+    private static readonly PATCH_VERSION_MARKER = "/*WSPATCH_V3*/";
 
     private static findMatchingParen(source: string, openParenIndex: number): number {
         let depth = 0;
@@ -145,29 +135,72 @@ export class WindsurfPatchService {
         return -1;
     }
 
-    private static tryInsertHandleAuthTokenFallback(fileContent: string): { updated: boolean; content: string } {
-        const matchIndex = fileContent.indexOf('async handleAuthToken(');
-        if (matchIndex === -1) {
-            return { updated: false, content: fileContent };
-        }
+    /**
+     * 提取 handleAuthToken 函数的完整源码和位置
+     */
+    private static extractFunction(fileContent: string, funcName: string): { source: string; start: number; end: number } | null {
+        const matchIndex = fileContent.indexOf(`async ${funcName}(`);
+        if (matchIndex === -1) { return null; }
 
         const openBraceIndex = fileContent.indexOf('{', matchIndex);
-        if (openBraceIndex === -1) {
-            return { updated: false, content: fileContent };
-        }
+        if (openBraceIndex === -1) { return null; }
 
         const closeBraceIndex = this.findMatchingBrace(fileContent, openBraceIndex);
-        if (closeBraceIndex === -1) {
-            return { updated: false, content: fileContent };
+        if (closeBraceIndex === -1) { return null; }
+
+        return {
+            source: fileContent.substring(matchIndex, closeBraceIndex + 1),
+            start: matchIndex,
+            end: closeBraceIndex + 1
+        };
+    }
+
+    /**
+     * 动态生成 handleAuthTokenWithShit：
+     * 从当前 handleAuthToken 复制，去掉 registerUser 调用，直接从参数中提取 apiKey/name
+     */
+    private static generateDynamicPatch(fileContent: string): string | null {
+        const extracted = this.extractFunction(fileContent, 'handleAuthToken');
+        if (!extracted) {
+            console.error('[WindsurfPatchService] 未找到 handleAuthToken 函数');
+            return null;
         }
 
-        const insertPosition = closeBraceIndex + 1;
-        const updatedContent =
-            fileContent.substring(0, insertPosition) +
-            this.NEW_HANDLE_AUTH_TOKEN_WITH_SHIT +
-            fileContent.substring(insertPosition);
+        let func = extracted.source;
+        console.log(`[WindsurfPatchService] 提取到 handleAuthToken, 长度: ${func.length}`);
 
-        return { updated: true, content: updatedContent };
+        // 改函数名
+        func = func.replace('async handleAuthToken(', 'async handleAuthTokenWithShit(');
+
+        // 匹配 registerUser 调用模式:
+        // const <resultVar>=await(0,<module>.registerUser)(<param>),{apiKey:<v1>,name:<v2>}=<resultVar>
+        const registerUserRegex = /const (\w+)=await\(0,\w+\.registerUser\)\((\w+)\),\{apiKey:(\w+),name:(\w+)\}=\1/;
+        const match = func.match(registerUserRegex);
+
+        if (!match) {
+            console.error('[WindsurfPatchService] 未匹配到 registerUser 模式');
+            return null;
+        }
+
+        const resultVar = match[1]; // e.g. 'e'
+        const paramName = match[2]; // e.g. 'A'
+        console.log(`[WindsurfPatchService] registerUser 变量: result=${resultVar}, param=${paramName}, apiKey=${match[3]}, name=${match[4]}`);
+
+        // 替换: 去掉 registerUser, 直接从参数解构
+        func = func.replace(
+            registerUserRegex,
+            `const {apiKey:${match[3]},name:${match[4]}}=${paramName}`
+        );
+
+        // 替换 resultVar.apiServerUrl → paramName.apiServerUrl
+        const apiServerUrlRegex = new RegExp(`\\b${resultVar}\\.apiServerUrl\\b`, 'g');
+        func = func.replace(apiServerUrlRegex, `${paramName}.apiServerUrl`);
+
+        // 在函数体开头插入版本标记
+        func = func.replace('{', `{${this.PATCH_VERSION_MARKER}`);
+
+        console.log(`[WindsurfPatchService] 生成的补丁函数长度: ${func.length}`);
+        return func;
     }
 
     private static findCommandRegistrationPushCall(fileContent: string): { openParenIndex: number; closeParenIndex: number; args: string } | null {
@@ -218,35 +251,25 @@ export class WindsurfPatchService {
     }
 
     /**
-     * 检查补丁是否已应用
-     * @returns 是否已应用补丁
+     * 检查补丁是否已应用且为最新版本
      */
     static async isPatchApplied(): Promise<boolean> {
-        console.log('[WindsurfPatchService] 开始检查补丁是否已应用...');
+        console.log('[WindsurfPatchService] 检查补丁状态...');
 
         try {
             const extensionPath = WindsurfPathService.getExtensionPath();
-            if (!extensionPath) {
-                console.warn('[WindsurfPatchService] 无法获取 Windsurf 扩展路径，补丁检查失败');
-                return false;
-            }
+            if (!extensionPath) { return false; }
 
-            console.log('[WindsurfPatchService] 读取扩展文件内容...');
             const fileContent = fs.readFileSync(extensionPath, 'utf-8');
-            console.log(`[WindsurfPatchService] 文件内容长度: ${fileContent.length} 字符`);
 
-            console.log(`[WindsurfPatchService] 检查关键字1: "${this.PATCH_KEYWORD_1}"`);
-            const hasKeyword1 = fileContent.includes(this.PATCH_KEYWORD_1);
-            console.log(`[WindsurfPatchService] 关键字1 ${hasKeyword1 ? '已找到' : '未找到'}`);
+            const hasCommand = fileContent.includes(this.PATCH_KEYWORD_1);
+            const hasFunction = fileContent.includes(this.PATCH_KEYWORD_2);
+            const hasVersion = fileContent.includes(this.PATCH_VERSION_MARKER);
 
-            console.log(`[WindsurfPatchService] 检查关键字2: "${this.PATCH_KEYWORD_2}"`);
-            const hasKeyword2 = fileContent.includes(this.PATCH_KEYWORD_2);
-            console.log(`[WindsurfPatchService] 关键字2 ${hasKeyword2 ? '已找到' : '未找到'}`);
+            console.log(`[WindsurfPatchService] 命令注册: ${hasCommand}, 函数: ${hasFunction}, 版本标记: ${hasVersion}`);
 
-            const isApplied = hasKeyword1 && hasKeyword2;
-            console.log(`[WindsurfPatchService] 补丁${isApplied ? '已应用' : '未应用'}`);
-
-            return isApplied;
+            // 必须三者都存在才算补丁已正确应用
+            return hasCommand && hasFunction && hasVersion;
         } catch (error) {
             console.error('[WindsurfPatchService] 检查补丁状态失败:', error);
             return false;
@@ -304,8 +327,7 @@ export class WindsurfPatchService {
     }
 
     /**
-     * 应用补丁
-     * @returns 补丁应用结果
+     * 应用补丁 - 动态生成，自动适配 Windsurf 版本
      */
     static async applyPatch(): Promise<PatchResult> {
         console.log('[WindsurfPatchService] 开始应用补丁...');
@@ -313,122 +335,86 @@ export class WindsurfPatchService {
         try {
             const extensionPath = WindsurfPathService.getExtensionPath();
             if (!extensionPath) {
-                console.error('[WindsurfPatchService] Windsurf 安装未找到');
-                return {
-                    success: false,
-                    error: "Windsurf installation not found"
-                };
+                return { success: false, error: "Windsurf installation not found" };
             }
 
-            // 检查权限
-            console.log('[WindsurfPatchService] 检查权限...');
             const permissionCheck = this.checkWritePermission();
             if (!permissionCheck.hasPermission) {
-                console.error('[WindsurfPatchService] 权限不足');
-                return {
-                    success: false,
-                    error: permissionCheck.error
-                };
+                return { success: false, error: permissionCheck.error };
             }
 
-            // 读取原始文件
-            console.log('[WindsurfPatchService] 读取原始文件...');
             let fileContent = fs.readFileSync(extensionPath, 'utf-8');
-            console.log(`[WindsurfPatchService] 原始文件大小: ${fileContent.length} 字符`);
+            console.log(`[WindsurfPatchService] 文件大小: ${fileContent.length}`);
+            let modified = false;
 
-            // 1. 添加新的 handleAuthTokenWithShit 函数
-            if (!fileContent.includes(this.PATCH_KEYWORD_2)) {
-                console.log('[WindsurfPatchService] 查找 handleAuthToken 函数...');
-                const handleAuthTokenIndex = fileContent.indexOf(this.ORIGINAL_HANDLE_AUTH_TOKEN);
-                if (handleAuthTokenIndex !== -1) {
-                    console.log(`[WindsurfPatchService] 找到 handleAuthToken 函数（精确匹配），位置: ${handleAuthTokenIndex}`);
+            // === 步骤 1: 处理 handleAuthTokenWithShit 函数 ===
+            const hasUpToDatePatch = fileContent.includes(this.PATCH_VERSION_MARKER);
 
-                    const insertPosition1 = handleAuthTokenIndex + this.ORIGINAL_HANDLE_AUTH_TOKEN.length;
-                    console.log('[WindsurfPatchService] 插入新的 handleAuthTokenWithShit 函数...');
-                    fileContent = fileContent.substring(0, insertPosition1) +
-                        this.NEW_HANDLE_AUTH_TOKEN_WITH_SHIT +
-                        fileContent.substring(insertPosition1);
-                    console.log(`[WindsurfPatchService] 插入函数后文件大小: ${fileContent.length} 字符`);
-                } else {
-                    console.log('[WindsurfPatchService] 精确匹配失败，尝试兼容模式插入 handleAuthTokenWithShit...');
-                    const fallback = this.tryInsertHandleAuthTokenFallback(fileContent);
-                    if (!fallback.updated) {
-                        console.error('[WindsurfPatchService] 未找到 handleAuthToken 函数');
-                        return {
-                            success: false,
-                            error: "Could not find handleAuthToken function. Windsurf version may be incompatible.\n\nThe expected function signature was not found in extension.js."
-                        };
-                    }
-                    fileContent = fallback.content;
-                    console.log(`[WindsurfPatchService] 兼容模式插入函数后文件大小: ${fileContent.length} 字符`);
+            if (!hasUpToDatePatch) {
+                // 移除旧版本的补丁函数（如果存在）
+                const existingPatch = this.extractFunction(fileContent, 'handleAuthTokenWithShit');
+                if (existingPatch) {
+                    console.log(`[WindsurfPatchService] 移除旧补丁函数 (位置: ${existingPatch.start}-${existingPatch.end})`);
+                    fileContent = fileContent.substring(0, existingPatch.start) + fileContent.substring(existingPatch.end);
                 }
+
+                // 动态生成新补丁函数
+                console.log('[WindsurfPatchService] 动态生成补丁函数...');
+                const patchedFunc = this.generateDynamicPatch(fileContent);
+                if (!patchedFunc) {
+                    return {
+                        success: false,
+                        error: "无法从当前 handleAuthToken 生成补丁。Windsurf 版本可能不兼容。"
+                    };
+                }
+
+                // 找到 handleAuthToken 并在其后插入
+                const authTokenFunc = this.extractFunction(fileContent, 'handleAuthToken');
+                if (!authTokenFunc) {
+                    return { success: false, error: "未找到 handleAuthToken 函数" };
+                }
+
+                console.log(`[WindsurfPatchService] 在位置 ${authTokenFunc.end} 插入补丁函数`);
+                fileContent = fileContent.substring(0, authTokenFunc.end) + patchedFunc + fileContent.substring(authTokenFunc.end);
+                modified = true;
             } else {
-                console.log('[WindsurfPatchService] handleAuthTokenWithShit 已存在，跳过插入函数');
+                console.log('[WindsurfPatchService] 补丁函数已是最新版本');
             }
 
-            // 2. 添加新的命令注册
+            // === 步骤 2: 处理命令注册 ===
             if (!fileContent.includes(this.PATCH_KEYWORD_1)) {
-                console.log('[WindsurfPatchService] 查找命令注册...');
-                const commandRegistrationIndex = fileContent.indexOf(this.ORIGINAL_COMMAND_REGISTRATION);
-                if (commandRegistrationIndex !== -1) {
-                    console.log(`[WindsurfPatchService] 找到命令注册（精确匹配），位置: ${commandRegistrationIndex}`);
-
-                    const insertPosition2 = commandRegistrationIndex + this.ORIGINAL_COMMAND_REGISTRATION.length;
-                    console.log('[WindsurfPatchService] 插入新的命令注册...');
-                    fileContent = fileContent.substring(0, insertPosition2) +
-                        this.NEW_COMMAND_REGISTRATION +
-                        fileContent.substring(insertPosition2);
-                    console.log(`[WindsurfPatchService] 插入命令后文件大小: ${fileContent.length} 字符`);
-                } else {
-                    console.log('[WindsurfPatchService] 精确匹配失败，尝试兼容模式插入命令注册...');
-                    const fallback = this.tryInsertCommandRegistrationFallback(fileContent);
-                    if (!fallback.updated) {
-                        console.error('[WindsurfPatchService] 未找到可插入命令注册的位置');
-                        return {
-                            success: false,
-                            error: "Could not find PROVIDE_AUTH_TOKEN_TO_AUTH_PROVIDER command registration. Windsurf version may be incompatible.\n\nThe expected command registration was not found in extension.js."
-                        };
-                    }
-                    fileContent = fallback.content;
-                    console.log(`[WindsurfPatchService] 兼容模式插入命令后文件大小: ${fileContent.length} 字符`);
+                console.log('[WindsurfPatchService] 插入命令注册...');
+                const cmdResult = this.tryInsertCommandRegistrationFallback(fileContent);
+                if (!cmdResult.updated) {
+                    return { success: false, error: "未找到可插入命令注册的位置。Windsurf 版本可能不兼容。" };
                 }
+                fileContent = cmdResult.content;
+                modified = true;
             } else {
-                console.log('[WindsurfPatchService] windsurf.provideAuthTokenToAuthProviderWithShit 已存在，跳过插入命令');
+                console.log('[WindsurfPatchService] 命令注册已存在');
             }
 
-            // 写入修改后的文件
-            console.log('[WindsurfPatchService] 写入修改后的文件...');
-            fs.writeFileSync(extensionPath, fileContent, 'utf-8');
-            console.log('[WindsurfPatchService] 文件写入完成');
+            // === 写入并验证 ===
+            if (modified) {
+                fs.writeFileSync(extensionPath, fileContent, 'utf-8');
+                console.log('[WindsurfPatchService] 文件已写入');
 
-            // 验证补丁是否成功应用
-            console.log('[WindsurfPatchService] 验证补丁是否成功应用...');
-            const verificationContent = fs.readFileSync(extensionPath, 'utf-8');
-            const hasKeyword1 = verificationContent.includes(this.PATCH_KEYWORD_1);
-            const hasKeyword2 = verificationContent.includes(this.PATCH_KEYWORD_2);
+                const verify = fs.readFileSync(extensionPath, 'utf-8');
+                const ok = verify.includes(this.PATCH_KEYWORD_1) &&
+                    verify.includes(this.PATCH_KEYWORD_2) &&
+                    verify.includes(this.PATCH_VERSION_MARKER);
 
-            console.log(`[WindsurfPatchService] 验证关键字1: ${hasKeyword1 ? '存在' : '不存在'}`);
-            console.log(`[WindsurfPatchService] 验证关键字2: ${hasKeyword2 ? '存在' : '不存在'}`);
-
-            if (hasKeyword1 && hasKeyword2) {
-                console.log('[WindsurfPatchService] 补丁应用成功');
-                return {
-                    success: true
-                };
-            } else {
-                console.error('[WindsurfPatchService] 补丁验证失败');
-                return {
-                    success: false,
-                    error: "补丁验证失败。补丁应用后未找到关键字。"
-                };
+                if (!ok) {
+                    return { success: false, error: "补丁验证失败" };
+                }
             }
+
+            console.log('[WindsurfPatchService] 补丁应用成功');
+            return { success: true };
 
         } catch (error) {
             console.error('[WindsurfPatchService] 补丁应用失败:', error);
-            return {
-                success: false,
-                error: `补丁失败: ${error instanceof Error ? error.message : '未知错误'}`
-            };
+            return { success: false, error: `补丁失败: ${error instanceof Error ? error.message : '未知错误'}` };
         }
     }
 
