@@ -312,6 +312,9 @@ export class ApiHelper {
                     email: email,
                     password: password,
                     returnSecureToken: true
+                },
+                {
+                    'Referer': 'https://windsurf.com/'
                 }
             );
 
@@ -456,6 +459,9 @@ export class ApiHelper {
                 {
                     grant_type: 'refresh_token',
                     refresh_token: refreshToken
+                },
+                {
+                    'Referer': 'https://windsurf.com/'
                 }
             );
 
