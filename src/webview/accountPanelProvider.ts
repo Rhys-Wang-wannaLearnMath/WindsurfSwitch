@@ -70,6 +70,10 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
         case 'copyApiKey':
           await this._copyApiKey(data.accountId);
           break;
+
+        case 'copyCredentials':
+          await this._copyCredentials(data.accountId);
+          break;
       }
     });
 
@@ -101,7 +105,8 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
         id: acc.id,
         email: acc.email,
         name: acc.name,
-        planName: acc.planName
+        planName: acc.planName,
+        hasPassword: Boolean(acc.password)
       }))
     });
   }
@@ -183,6 +188,7 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
             apiKey: result.apiKey!,
             apiServerUrl: result.apiServerUrl!,
             refreshToken: result.refreshToken!,
+            password: pair.password,
             planName: 'Pro'
           });
           successCount++;
@@ -213,6 +219,7 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
         apiKey: result.apiKey!,
         apiServerUrl: result.apiServerUrl!,
         refreshToken: result.refreshToken!,
+        password,
         planName: 'Pro'
       });
 
@@ -296,6 +303,25 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
 
     await vscode.env.clipboard.writeText(account.apiKey);
     this._sendMessage('success', 'API Key 已复制');
+  }
+
+  /**
+   * 复制账号密码
+   */
+  private async _copyCredentials(accountId: string) {
+    const account = await this._accountManager.getAccount(accountId);
+    if (!account) {
+      this._sendMessage('error', '账号不存在');
+      return;
+    }
+
+    if (!account.password) {
+      this._sendMessage('error', '该账号未保存密码，无法复制');
+      return;
+    }
+
+    await vscode.env.clipboard.writeText(`${account.email},${account.password}`);
+    this._sendMessage('success', '账号密码已复制（邮箱,密码）');
   }
 
   /**
@@ -449,6 +475,11 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     
     .icon-btn:hover {
       background: var(--vscode-toolbar-hoverBackground);
+    }
+
+    .icon-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     
     .btn {
@@ -662,6 +693,7 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
             <div class="name">\${acc.name} · \${acc.planName}</div>
           </div>
           <div class="actions">
+            <button class="icon-btn" onclick="event.stopPropagation(); copyCredentials('\${acc.id}')" title="\${acc.hasPassword ? '复制账号密码' : '该账号未保存密码'}" \${acc.hasPassword ? '' : 'disabled'}>🔐</button>
             <button class="icon-btn" onclick="event.stopPropagation(); copyApiKey('\${acc.id}')" title="复制 API Key">📋</button>
             <button class="icon-btn" onclick="event.stopPropagation(); deleteAccount('\${acc.id}')" title="删除">🗑️</button>
           </div>
@@ -713,6 +745,10 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     
     function copyApiKey(accountId) {
       vscode.postMessage({ type: 'copyApiKey', accountId });
+    }
+
+    function copyCredentials(accountId) {
+      vscode.postMessage({ type: 'copyCredentials', accountId });
     }
     
     function deleteAccount(accountId) {

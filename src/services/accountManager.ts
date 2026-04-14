@@ -16,6 +16,7 @@ export interface Account {
     apiKey: string;
     apiServerUrl: string;
     refreshToken: string;
+    password?: string;
     planName: string;
     createdAt: string;
     updatedAt: string;
@@ -81,6 +82,11 @@ export class AccountManager {
             if (apiKey) {
                 account.apiKey = apiKey;
             }
+
+            const password = await this.context.secrets.get(`${AccountManager.SECRETS_PREFIX}${account.id}.password`);
+            if (password) {
+                account.password = password;
+            }
         }
 
         return accounts;
@@ -119,12 +125,19 @@ export class AccountManager {
                 account.apiKey
             );
         }
+        if (account.password) {
+            await this.context.secrets.store(
+                `${AccountManager.SECRETS_PREFIX}${account.id}.password`,
+                account.password
+            );
+        }
 
         // 存储账号列表（不含敏感信息）
         const accounts = this.context.globalState.get<Account[]>(AccountManager.ACCOUNTS_KEY, []);
         const accountToStore = { ...account };
         accountToStore.refreshToken = '';  // 不存储在 globalState
         accountToStore.apiKey = '';
+        accountToStore.password = '';
 
         accounts.push(accountToStore);
         await this.context.globalState.update(AccountManager.ACCOUNTS_KEY, accounts);
@@ -156,6 +169,16 @@ export class AccountManager {
                 updates.apiKey
             );
         }
+        if (updates.password !== undefined) {
+            if (updates.password) {
+                await this.context.secrets.store(
+                    `${AccountManager.SECRETS_PREFIX}${id}.password`,
+                    updates.password
+                );
+            } else {
+                await this.context.secrets.delete(`${AccountManager.SECRETS_PREFIX}${id}.password`);
+            }
+        }
 
         // 更新账号信息
         const updatedAccount = {
@@ -167,6 +190,7 @@ export class AccountManager {
         // 清除敏感信息后存储
         updatedAccount.refreshToken = '';
         updatedAccount.apiKey = '';
+        updatedAccount.password = '';
         accounts[index] = updatedAccount;
 
         await this.context.globalState.update(AccountManager.ACCOUNTS_KEY, accounts);
@@ -189,6 +213,7 @@ export class AccountManager {
         // 删除敏感信息
         await this.context.secrets.delete(`${AccountManager.SECRETS_PREFIX}${id}.refreshToken`);
         await this.context.secrets.delete(`${AccountManager.SECRETS_PREFIX}${id}.apiKey`);
+        await this.context.secrets.delete(`${AccountManager.SECRETS_PREFIX}${id}.password`);
 
         // 从列表中移除
         accounts.splice(index, 1);
@@ -221,6 +246,7 @@ export class AccountManager {
                     apiKey: acc.apiKey || '',
                     apiServerUrl: acc.apiServerUrl || 'https://server.self-serve.windsurf.com',
                     refreshToken: acc.refreshToken || '',
+                    password: acc.password || '',
                     planName: acc.planName || 'Pro'
                 });
                 count++;
