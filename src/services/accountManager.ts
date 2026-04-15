@@ -13,11 +13,11 @@ export interface Account {
     id: string;
     email: string;
     name: string;
-    remark?: string;
     apiKey: string;
     apiServerUrl: string;
     refreshToken: string;
     password?: string;
+    codex?: string;
     planName: string;
     createdAt: string;
     updatedAt: string;
@@ -30,6 +30,7 @@ export class AccountManager {
     private static readonly ACCOUNTS_KEY = 'windsurfSwitch.accounts';
     private static readonly SECRETS_PREFIX = 'windsurfSwitch.secret.';
     private static readonly CURRENT_INDEX_KEY = 'windsurfSwitch.currentAccountIndex';
+    private static readonly CURRENT_ACCOUNT_ID_KEY = 'windsurfSwitch.currentAccountId';
 
     private context: vscode.ExtensionContext;
 
@@ -37,15 +38,25 @@ export class AccountManager {
         this.context = context;
     }
 
-    private normalizeRemark(remark?: string): string {
-        return (remark ?? '').trim();
-    }
-
     /**
      * 获取当前账号索引
      */
     getCurrentAccountIndex(): number {
         return this.context.globalState.get<number>(AccountManager.CURRENT_INDEX_KEY, 0);
+    }
+
+    /**
+     * 获取当前账号 ID
+     */
+    getCurrentAccountId(): string | undefined {
+        return this.context.globalState.get<string>(AccountManager.CURRENT_ACCOUNT_ID_KEY);
+    }
+
+    /**
+     * 设置当前账号 ID
+     */
+    async setCurrentAccountId(id: string): Promise<void> {
+        await this.context.globalState.update(AccountManager.CURRENT_ACCOUNT_ID_KEY, id);
     }
 
     /**
@@ -112,7 +123,6 @@ export class AccountManager {
         const now = new Date().toISOString();
         const account: Account = {
             ...accountData,
-            remark: this.normalizeRemark(accountData.remark),
             id: uuidv4(),
             createdAt: now,
             updatedAt: now
@@ -162,31 +172,24 @@ export class AccountManager {
             return undefined;
         }
 
-        const normalizedUpdates: Partial<Account> = {
-            ...updates
-        };
-        if (normalizedUpdates.remark !== undefined) {
-            normalizedUpdates.remark = this.normalizeRemark(normalizedUpdates.remark);
-        }
-
         // 更新敏感信息
-        if (normalizedUpdates.refreshToken) {
+        if (updates.refreshToken) {
             await this.context.secrets.store(
                 `${AccountManager.SECRETS_PREFIX}${id}.refreshToken`,
-                normalizedUpdates.refreshToken
+                updates.refreshToken
             );
         }
-        if (normalizedUpdates.apiKey) {
+        if (updates.apiKey) {
             await this.context.secrets.store(
                 `${AccountManager.SECRETS_PREFIX}${id}.apiKey`,
-                normalizedUpdates.apiKey
+                updates.apiKey
             );
         }
-        if (normalizedUpdates.password !== undefined) {
-            if (normalizedUpdates.password) {
+        if (updates.password !== undefined) {
+            if (updates.password) {
                 await this.context.secrets.store(
                     `${AccountManager.SECRETS_PREFIX}${id}.password`,
-                    normalizedUpdates.password
+                    updates.password
                 );
             } else {
                 await this.context.secrets.delete(`${AccountManager.SECRETS_PREFIX}${id}.password`);
@@ -196,7 +199,7 @@ export class AccountManager {
         // 更新账号信息
         const updatedAccount = {
             ...accounts[index],
-            ...normalizedUpdates,
+            ...updates,
             updatedAt: new Date().toISOString()
         };
 
@@ -256,7 +259,6 @@ export class AccountManager {
                 await this.addAccount({
                     email: acc.email,
                     name: acc.name || acc.email.split('@')[0],
-                    remark: acc.remark || '',
                     apiKey: acc.apiKey || '',
                     apiServerUrl: acc.apiServerUrl || 'https://server.self-serve.windsurf.com',
                     refreshToken: acc.refreshToken || '',

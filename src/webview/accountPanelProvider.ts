@@ -75,8 +75,8 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
           await this._copyCredentials(data.accountId);
           break;
 
-        case 'updateRemark':
-          await this._updateRemark(data.accountId, data.remark);
+        case 'editCodex':
+          await this._editCodex(data.accountId, data.currentCodex);
           break;
       }
     });
@@ -109,7 +109,7 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
         id: acc.id,
         email: acc.email,
         name: acc.name,
-        remark: acc.remark || '',
+        codex: acc.codex || '',
         planName: acc.planName,
         hasPassword: Boolean(acc.password)
       }))
@@ -122,39 +122,14 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
   private async _sendCurrentAccount() {
     if (!this._view) return;
 
-    const accounts = await this._accountManager.getAccounts();
-    const current = await this._accountSwitcher.getCurrentAccount();
-    let currentAccount: { email: string; name: string; remark: string } | null = null;
-
-    if (current) {
-      const matchedAccount = accounts.find(acc => acc.email === current.email);
-      currentAccount = {
-        email: current.email,
-        name: current.name,
-        remark: matchedAccount?.remark || ''
-      };
-
-      if (matchedAccount) {
-        const matchedIndex = accounts.findIndex(acc => acc.id === matchedAccount.id);
-        if (matchedIndex >= 0) {
-          await this._accountManager.setCurrentAccountIndex(matchedIndex);
-        }
-      }
-    } else if (accounts.length > 0) {
-      const storedIndex = this._accountManager.getCurrentAccountIndex();
-      const fallbackIndex = storedIndex >= 0 && storedIndex < accounts.length ? storedIndex : 0;
-      const fallbackAccount = accounts[fallbackIndex];
-
-      currentAccount = {
-        email: fallbackAccount.email,
-        name: fallbackAccount.name,
-        remark: fallbackAccount.remark || ''
-      };
+    const currentId = this._accountManager.getCurrentAccountId();
+    let account: Account | undefined;
+    if (currentId) {
+      account = await this._accountManager.getAccount(currentId);
     }
-
     this._view.webview.postMessage({
       type: 'currentAccount',
-      account: currentAccount
+      account: account ? { email: account.email, name: account.name, codex: account.codex || '' } : null
     });
   }
 
@@ -168,24 +143,20 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const accounts = await this._accountManager.getAccounts();
-    const accountIndex = accounts.findIndex(acc => acc.id === accountId);
-
     this._sendMessage('info', '正在切换账号...');
 
     try {
       const result = await this._accountSwitcher.switchAccount(account);
 
-      if (accountIndex >= 0) {
-        await this._accountManager.setCurrentAccountIndex(accountIndex);
-        await this._sendCurrentAccount();
-      }
-
       if (result.needsRestart) {
         this._sendMessage('info', '补丁已应用，正在重启 Windsurf...');
       } else if (result.success && result.method === 'injection') {
+        await this._accountManager.setCurrentAccountId(accountId);
+        await this._sendCurrentAccount();
         this._sendMessage('success', '切换成功（补丁注入），窗口即将重载...');
       } else if (result.method === 'fallback') {
+        await this._accountManager.setCurrentAccountId(accountId);
+        await this._sendCurrentAccount();
         this._sendMessage('error', `注入未成功，已尝试备用方案。请查看「Windsurf 换号」输出面板获取详细日志。`);
       } else {
         this._sendMessage('error', `切换失败: ${result.error || '未知错误'}`);
@@ -367,25 +338,23 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * 更新备注名
+   * 编辑备注名
    */
-  private async _updateRemark(accountId: string, remark: string) {
-    const account = await this._accountManager.getAccount(accountId);
-    if (!account) {
+  private async _editCodex(accountId: string, currentCodex: string) {
+    const codex = await vscode.window.showInputBox({
+      prompt: '输入备注名（留空清除）',
+      value: currentCodex || '',
+      placeHolder: '例如：工作号、测试号'
+    });
+    if (codex === undefined) return;
+    const updated = await this._accountManager.updateAccount(accountId, { codex: codex.trim() });
+    if (updated) {
+      await this._sendAccountList();
+      await this._sendCurrentAccount();
+      this._sendMessage('success', '备注已更新');
+    } else {
       this._sendMessage('error', '账号不存在');
-      return;
     }
-
-    const normalizedRemark = (remark ?? '').trim();
-    const updated = await this._accountManager.updateAccount(accountId, { remark: normalizedRemark });
-
-    if (!updated) {
-      this._sendMessage('error', '更新备注失败');
-      return;
-    }
-
-    this._sendMessage('success', normalizedRemark ? `备注已更新：${normalizedRemark}` : '备注已清除');
-    await this._sendAccountList();
   }
 
   /**
@@ -453,12 +422,6 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-descriptionForeground);
       margin-top: 2px;
     }
-
-    .current-account .remark {
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-      margin-top: 2px;
-    }
     
     .current-account .badge {
       display: inline-block;
@@ -518,18 +481,6 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     .account-item .name {
       font-size: 11px;
       color: var(--vscode-descriptionForeground);
-    }
-
-    .account-item .remark {
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .account-item .remark.empty {
-      font-style: italic;
     }
     
     .account-item .actions {
@@ -714,15 +665,6 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     const vscode = acquireVsCodeApi();
     let accounts = [];
     let currentEmail = null;
-
-    function escapeHtml(value) {
-      return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
     
     // 请求数据
     vscode.postMessage({ type: 'getAccounts' });
@@ -753,15 +695,13 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     function renderCurrentAccount(account) {
       const el = document.getElementById('currentAccount');
       if (account) {
-        const remarkHtml = account.remark
-          ? '<div class="remark">备注：' + escapeHtml(account.remark) + '</div>'
-          : '';
-
-        el.innerHTML =
-          '<div class="email">' + escapeHtml(account.email) + '</div>' +
-          '<div class="name">' + escapeHtml(account.name) + '</div>' +
-          remarkHtml +
-          '<div class="badge">当前使用</div>';
+        const codexHtml = account.codex ? \`<div class="name" style="font-weight:600;color:var(--vscode-foreground);">\${account.codex}</div>\` : '';
+        el.innerHTML = \`
+          \${codexHtml}
+          <div class="email">\${account.email}</div>
+          <div class="name">\${account.name}</div>
+          <div class="badge">当前使用</div>
+        \`;
       } else {
         el.innerHTML = '<div class="no-account">未登录</div>';
       }
@@ -771,39 +711,30 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
       const el = document.getElementById('accountList');
       
       if (accounts.length === 0) {
-        el.innerHTML =
-          '<div class="empty-state">' +
-          '<div class="icon">📭</div>' +
-          '<div>暂无账号，点击上方添加</div>' +
-          '</div>';
+        el.innerHTML = \`
+          <div class="empty-state">
+            <div class="icon">📭</div>
+            <div>暂无账号，点击上方添加</div>
+          </div>
+        \`;
         return;
       }
       
-      el.innerHTML = accounts.map(acc => {
-        const safeEmail = escapeHtml(acc.email);
-        const safeName = escapeHtml(acc.name);
-        const safePlanName = escapeHtml(acc.planName);
-        const safeRemark = escapeHtml(acc.remark || '');
-        const remarkClass = acc.remark ? 'remark' : 'remark empty';
-        const remarkText = acc.remark ? '备注：' + safeRemark : '备注：未设置';
-        const currentClass = acc.email === currentEmail ? 'current' : '';
-        const copyTitle = acc.hasPassword ? '复制账号密码' : '该账号未保存密码';
-        const disabledAttr = acc.hasPassword ? '' : 'disabled';
-
-        return '<div class="account-item ' + currentClass + '" onclick="switchAccount(\'' + acc.id + '\')">' +
-          '<div class="info">' +
-          '<div class="email">' + safeEmail + '</div>' +
-          '<div class="name">' + safeName + ' · ' + safePlanName + '</div>' +
-          '<div class="' + remarkClass + '">' + remarkText + '</div>' +
-          '</div>' +
-          '<div class="actions">' +
-          '<button class="icon-btn" onclick="event.stopPropagation(); editRemark(\'' + acc.id + '\')" title="编辑备注">🏷️</button>' +
-          '<button class="icon-btn" onclick="event.stopPropagation(); copyCredentials(\'' + acc.id + '\')" title="' + copyTitle + '" ' + disabledAttr + '>🔐</button>' +
-          '<button class="icon-btn" onclick="event.stopPropagation(); copyApiKey(\'' + acc.id + '\')" title="复制 API Key">📋</button>' +
-          '<button class="icon-btn" onclick="event.stopPropagation(); deleteAccount(\'' + acc.id + '\')" title="删除">🗑️</button>' +
-          '</div>' +
-          '</div>';
-      }).join('');
+      el.innerHTML = accounts.map(acc => \`
+        <div class="account-item \${acc.email === currentEmail ? 'current' : ''}" 
+             onclick="switchAccount('\${acc.id}')">
+          <div class="info">
+            <div class="email">\${acc.codex ? acc.codex + ' · ' : ''}\${acc.email}</div>
+            <div class="name">\${acc.name} · \${acc.planName}</div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" onclick="event.stopPropagation(); editCodex('\${acc.id}', '\${(acc.codex||'').replace(/'/g,"\\\\'")}')" title="编辑备注">✏️</button>
+            <button class="icon-btn" onclick="event.stopPropagation(); copyCredentials('\${acc.id}')" title="\${acc.hasPassword ? '复制账号密码' : '该账号未保存密码'}" \${acc.hasPassword ? '' : 'disabled'}>🔐</button>
+            <button class="icon-btn" onclick="event.stopPropagation(); copyApiKey('\${acc.id}')" title="复制 API Key">📋</button>
+            <button class="icon-btn" onclick="event.stopPropagation(); deleteAccount('\${acc.id}')" title="删除">🗑️</button>
+          </div>
+        </div>
+      \`).join('');
     }
     
     function showAddForm() {
@@ -855,24 +786,13 @@ export class AccountPanelProvider implements vscode.WebviewViewProvider {
     function copyCredentials(accountId) {
       vscode.postMessage({ type: 'copyCredentials', accountId });
     }
-
-    function editRemark(accountId) {
-      const acc = accounts.find(a => a.id === accountId);
-      if (!acc) {
-        showMessage('error', '账号不存在');
-        return;
-      }
-
-      const remark = window.prompt('请输入备注名（留空则清空）', acc.remark || '');
-      if (remark === null) {
-        return;
-      }
-
-      vscode.postMessage({ type: 'updateRemark', accountId, remark });
-    }
     
     function deleteAccount(accountId) {
       vscode.postMessage({ type: 'deleteAccount', accountId });
+    }
+
+    function editCodex(accountId, current) {
+      vscode.postMessage({ type: 'editCodex', accountId, currentCodex: current || '' });
     }
     
     function showMessage(type, text) {
