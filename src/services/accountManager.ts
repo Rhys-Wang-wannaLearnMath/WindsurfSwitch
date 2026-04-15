@@ -13,6 +13,7 @@ export interface Account {
     id: string;
     email: string;
     name: string;
+    remark?: string;
     apiKey: string;
     apiServerUrl: string;
     refreshToken: string;
@@ -34,6 +35,10 @@ export class AccountManager {
 
     constructor(context: vscode.ExtensionContext) {
         this.context = context;
+    }
+
+    private normalizeRemark(remark?: string): string {
+        return (remark ?? '').trim();
     }
 
     /**
@@ -107,6 +112,7 @@ export class AccountManager {
         const now = new Date().toISOString();
         const account: Account = {
             ...accountData,
+            remark: this.normalizeRemark(accountData.remark),
             id: uuidv4(),
             createdAt: now,
             updatedAt: now
@@ -156,24 +162,31 @@ export class AccountManager {
             return undefined;
         }
 
+        const normalizedUpdates: Partial<Account> = {
+            ...updates
+        };
+        if (normalizedUpdates.remark !== undefined) {
+            normalizedUpdates.remark = this.normalizeRemark(normalizedUpdates.remark);
+        }
+
         // 更新敏感信息
-        if (updates.refreshToken) {
+        if (normalizedUpdates.refreshToken) {
             await this.context.secrets.store(
                 `${AccountManager.SECRETS_PREFIX}${id}.refreshToken`,
-                updates.refreshToken
+                normalizedUpdates.refreshToken
             );
         }
-        if (updates.apiKey) {
+        if (normalizedUpdates.apiKey) {
             await this.context.secrets.store(
                 `${AccountManager.SECRETS_PREFIX}${id}.apiKey`,
-                updates.apiKey
+                normalizedUpdates.apiKey
             );
         }
-        if (updates.password !== undefined) {
-            if (updates.password) {
+        if (normalizedUpdates.password !== undefined) {
+            if (normalizedUpdates.password) {
                 await this.context.secrets.store(
                     `${AccountManager.SECRETS_PREFIX}${id}.password`,
-                    updates.password
+                    normalizedUpdates.password
                 );
             } else {
                 await this.context.secrets.delete(`${AccountManager.SECRETS_PREFIX}${id}.password`);
@@ -183,7 +196,7 @@ export class AccountManager {
         // 更新账号信息
         const updatedAccount = {
             ...accounts[index],
-            ...updates,
+            ...normalizedUpdates,
             updatedAt: new Date().toISOString()
         };
 
@@ -243,6 +256,7 @@ export class AccountManager {
                 await this.addAccount({
                     email: acc.email,
                     name: acc.name || acc.email.split('@')[0],
+                    remark: acc.remark || '',
                     apiKey: acc.apiKey || '',
                     apiServerUrl: acc.apiServerUrl || 'https://server.self-serve.windsurf.com',
                     refreshToken: acc.refreshToken || '',
