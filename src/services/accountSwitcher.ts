@@ -21,6 +21,20 @@ interface AuthStatus {
     planName: string;
 }
 
+export interface DetectedOnlineAccount {
+    email: string;
+    name: string;
+    apiKey: string;
+    apiServerUrl: string;
+    planName: string;
+}
+
+export interface ClearAuthResult {
+    success: boolean;
+    deletedKeyCount: number;
+    error?: string;
+}
+
 /**
  * 账号切换器
  * 
@@ -59,6 +73,29 @@ export class AccountSwitcher {
      */
     showLog(): void {
         this.outputChannel.show();
+    }
+
+    private toNonEmptyString(value: unknown): string | undefined {
+        if (typeof value !== 'string') {
+            return undefined;
+        }
+
+        const normalized = value.trim();
+        return normalized.length > 0 ? normalized : undefined;
+    }
+
+    private isLikelyEmail(value: string): boolean {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+    }
+
+    private buildFallbackEmail(seed: string): string {
+        const normalized = seed
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '.')
+            .replace(/^\.+|\.+$/g, '');
+
+        return `${normalized || 'current'}.imported@windsurf.local`;
     }
 
     /**
@@ -227,6 +264,167 @@ export class AccountSwitcher {
             return authStatus as AuthStatus;
         } catch {
             return null;
+        }
+    }
+
+    /**
+     * 检测当前在线账号并转换为可导入结构
+     */
+    async detectCurrentOnlineAccount(): Promise<DetectedOnlineAccount | null> {
+        this.log('开始检测当前在线账号...');
+
+        const codeiumConfigRaw = await DatabaseHelper.readFromDB('codeium.windsurf');
+        const authStatusRaw = await DatabaseHelper.readFromDB('windsurfAuthStatus');
+        const authNameRaw = await DatabaseHelper.readFromDB('codeium.windsurf-windsurf_auth');
+        const authKeys = await DatabaseHelper.listKeysByPattern('windsurf_auth-%');
+
+        const codeiumConfig: Record<string, unknown> =
+            typeof codeiumConfigRaw === 'object' && codeiumConfigRaw !== null
+                ? codeiumConfigRaw as Record<string, unknown>
+                : {};
+        const authStatus: Record<string, unknown> =
+            typeof authStatusRaw === 'object' && authStatusRaw !== null
+                ? authStatusRaw as Record<string, unknown>
+                : {};
+
+        const apiKey = this.toNonEmptyString(codeiumConfig['codeium.apiKey'])
+            || this.toNonEmptyString(codeiumConfig['apiKey'])
+            || this.toNonEmptyString(authStatus['apiKey']);
+
+        if (!apiKey) {
+            this.log('检测失败：未找到可用 API Key');
+            return null;
+        }
+
+        const apiServerUrl = this.toNonEmptyString(codeiumConfig['apiServerUrl'])
+            || 'https://server.self-serve.windsurf.com';
+
+        const authStatusEmail = this.toNonEmptyString(authStatus['email']);
+        const authStatusName = this.toNonEmptyString(authStatus['name']);
+        const authName = this.toNonEmptyString(authNameRaw);
+        const planName = this.toNonEmptyString(authStatus['planName']) || 'Pro';
+
+        const parsedIdentifiers = Array.from(new Set(
+            authKeys
+                .map(key => key.replace(/^windsurf_auth-/, '').replace(/-usages$/, '').trim())
+                .filter(Boolean)
+        ));
+
+        const emailCandidates: string[] = [];
+        if (authStatusEmail && this.isLikelyEmail(authStatusEmail)) {
+            emailCandidates.push(authStatusEmail);
+        }
+        if (authStatusName && this.isLikelyEmail(authStatusName)) {
+            emailCandidates.push(authStatusName);
+        }
+        if (authName && this.isLikelyEmail(authName)) {
+            emailCandidates.push(authName);
+        }
+
+        for (const identifier of parsedIdentifiers) {
+            if (this.isLikelyEmail(identifier)) {
+                emailCandidates.push(identifier);
+            }
+        }
+
+        const email = emailCandidates[0] || this.buildFallbackEmail(authStatusName || authName || parsedIdentifiers[0] || 'current');
+        const name = authStatusName
+            || authName
+            || parsedIdentifiers.find(identifier => !this.isLikelyEmail(identifier))
+            || email.split('@')[0];
+
+        this.log(`检测到在线账号: ${email}`);
+        this.log(`检测到 API Key: ${apiKey.substring(0, 20)}...`);
+
+        return {
+            email,
+            name,
+            apiKey,
+            apiServerUrl,
+            planName
+        };
+    }
+
+    /**
+     * 退出并清理当前认证数据
+     */
+    async clearCurrentAuthData(): Promise<ClearAuthResult> {
+        this.outputChannel.clear();
+        this.outputChannel.show(true);
+        this.log('========== 开始退出并清理认证 ==========');
+
+        let deletedKeyCount = 0;
+
+        try {
+            const logoutCommands = [
+                'windsurf.logout',
+                'windsurf.signOut',
+                'windsurf.signout',
+                'codeium.logout',
+                'codeium.signOut',
+                'codeium.signout'
+            ];
+
+            for (const command of logoutCommands) {
+                try {
+                    await vscode.commands.executeCommand(command);
+                    this.log(`已调用 ${command}`);
+                } catch (error) {
+                    this.log(`[登出] 调用 ${command} 失败: ${(error as Error).message}`);
+                }
+            }
+
+            const exactKeys = [
+                'windsurfAuthStatus',
+                'codeium.windsurf',
+                'codeium.windsurf-windsurf_auth',
+                'windsurf_auth.apiServerUrl'
+            ];
+
+            for (const key of exactKeys) {
+                const existing = await DatabaseHelper.readFromDB(key);
+                if (existing === null) {
+                    continue;
+                }
+
+                const deleted = await DatabaseHelper.deleteFromDB(key);
+                if (deleted) {
+                    deletedKeyCount++;
+                    this.log(`已删除: ${key}`);
+                }
+            }
+
+            const patterns = [
+                'windsurf_auth-%',
+                'secret://{"extensionId":"codeium.windsurf"%',
+                'secret://%codeium.windsurf%',
+                'secret://%windsurf%',
+                'secret://%codeium%',
+                'windsurf%auth%',
+                'codeium%auth%'
+            ];
+
+            for (const pattern of patterns) {
+                const count = await DatabaseHelper.deleteByPattern(pattern);
+                deletedKeyCount += count;
+                this.log(`按模式清理 ${count} 项: ${pattern}`);
+            }
+
+            this.log(`认证清理完成，共处理 ${deletedKeyCount} 项`);
+
+            return {
+                success: true,
+                deletedKeyCount
+            };
+        } catch (error) {
+            const errorMessage = (error as Error).message;
+            this.log(`认证清理失败: ${errorMessage}`);
+
+            return {
+                success: false,
+                deletedKeyCount,
+                error: errorMessage
+            };
         }
     }
 

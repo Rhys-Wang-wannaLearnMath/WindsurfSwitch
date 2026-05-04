@@ -445,6 +445,40 @@ export class ApiHelper {
         }
     }
 
+    async loginWithFirebaseTokens(email: string, firebaseTokens: {
+        idToken: string;
+        refreshToken: string;
+        expiresIn: number;
+    }): Promise<LoginResult> {
+        try {
+            this.log('使用已获取的 Firebase Token 登录...');
+            this.log(`账号: ${email}`);
+
+            this.log('正在获取 API Key...');
+            const apiKeyResult = await this.getApiKey(firebaseTokens.idToken);
+            this.log(`API Key 获取成功: ${apiKeyResult.name}`);
+
+            return {
+                success: true,
+                email: email,
+                name: apiKeyResult.name,
+                apiKey: apiKeyResult.apiKey,
+                apiServerUrl: apiKeyResult.apiServerUrl,
+                refreshToken: firebaseTokens.refreshToken,
+                idToken: firebaseTokens.idToken,
+                idTokenExpiresAt: Date.now() + (firebaseTokens.expiresIn * 1000)
+            };
+        } catch (error) {
+            const err = error as Error;
+            this.log(`登录失败: ${err.message}`);
+
+            return {
+                success: false,
+                error: err.message
+            };
+        }
+    }
+
     /**
      * 使用 refreshToken 刷新 token
      */

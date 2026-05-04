@@ -24,7 +24,8 @@ module.exports = (env, argv) => {
         },
         externals: {
             vscode: 'commonjs vscode',
-            'sql.js': 'commonjs sql.js'
+            'sql.js': 'commonjs sql.js',
+            'sql.js/dist/sql-asm.js': 'commonjs sql.js/dist/sql-asm.js'
         },
         resolve: {
             extensions: ['.ts', '.js']

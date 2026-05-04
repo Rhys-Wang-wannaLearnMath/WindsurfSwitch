@@ -10,6 +10,8 @@ vsc-extension-quickstart.md
 **/*.ts
 webpack/**
 node_modules/**
+!node_modules/sql.js/**
+!node_modules/sql.js/dist/**
 .env
 .env.*
 out/**

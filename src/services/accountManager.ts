@@ -55,7 +55,7 @@ export class AccountManager {
     /**
      * 设置当前账号 ID
      */
-    async setCurrentAccountId(id: string): Promise<void> {
+    async setCurrentAccountId(id: string | undefined): Promise<void> {
         await this.context.globalState.update(AccountManager.CURRENT_ACCOUNT_ID_KEY, id);
     }
 

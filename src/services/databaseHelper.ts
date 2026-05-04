@@ -21,30 +21,36 @@ interface SqlJs {
 let sqlJsInstance: SqlJs | null = null;
 
 /**
- * 初始化 sql.js
+ * 初始化 sql.js（使用 asm.js 版本，纯 JS 无需 .wasm 文件）
  */
 async function initSqlJs(): Promise<SqlJs> {
     if (sqlJsInstance) {
         return sqlJsInstance;
     }
 
-    // 动态导入 sql.js
     try {
-        console.log('[DatabaseHelper] 正在加载 sql.js 模块...');
-        const sqlJsModule = require('sql.js');
-        console.log('[DatabaseHelper] sql.js 模块类型:', typeof sqlJsModule, '键:', Object.keys(sqlJsModule || {}).join(','));
-        // 兼容 CommonJS default export 和 ESM interop
-        const initFn = typeof sqlJsModule === 'function' ? sqlJsModule : (sqlJsModule.default || sqlJsModule);
-        if (typeof initFn !== 'function') {
-            throw new Error(`sql.js 导出不是函数, 类型: ${typeof initFn}`);
+        console.log('[DatabaseHelper] 正在加载 sql.js (asm) 模块...');
+        // 使用 asm.js 版本：纯 JavaScript 实现，不需要加载 .wasm 文件
+        const sqlJsModule = require('sql.js/dist/sql-asm.js');
+
+        // 兼容多种导出形态
+        const initFn = typeof sqlJsModule === 'function'
+            ? sqlJsModule
+            : (typeof sqlJsModule.default === 'function' ? sqlJsModule.default : null);
+
+        if (initFn) {
+            sqlJsInstance = await initFn();
+        } else if (sqlJsModule && typeof sqlJsModule.Database === 'function') {
+            sqlJsInstance = sqlJsModule as SqlJs;
+        } else {
+            throw new Error(`sql.js 导出形态异常, 类型: ${typeof sqlJsModule}`);
         }
-        sqlJsInstance = await initFn();
-        console.log('[DatabaseHelper] sql.js 初始化完成');
+
+        console.log('[DatabaseHelper] sql.js (asm) 初始化完成');
         return sqlJsInstance!;
     } catch (error) {
         const err = error as Error;
         console.error('[DatabaseHelper] sql.js 加载/初始化失败:', err.message);
-        console.error('[DatabaseHelper] sql.js 堆栈:', err.stack || '无');
         throw new Error(`sql.js 加载失败: ${err.message}`);
     }
 }
@@ -209,6 +215,35 @@ export class DatabaseHelper {
         } catch (error) {
             console.error('[DatabaseHelper] 批量删除失败:', error);
             return 0;
+        }
+    }
+
+    /**
+     * 查询匹配模式的 keys
+     */
+    static async listKeysByPattern(pattern: string): Promise<string[]> {
+        const SQL = await initSqlJs();
+        const dbPath = PathDetector.getDBPath();
+
+        try {
+            const dbBuffer = await fs.readFile(dbPath);
+            const db = new SQL.Database(dbBuffer);
+
+            try {
+                const result = db.exec('SELECT key FROM ItemTable WHERE key LIKE ?', [pattern]);
+                if (result.length === 0 || result[0].values.length === 0) {
+                    return [];
+                }
+
+                return result[0].values
+                    .map(row => row[0])
+                    .filter((key): key is string => typeof key === 'string');
+            } finally {
+                db.close();
+            }
+        } catch (error) {
+            console.error('[DatabaseHelper] 查询 keys 失败:', error);
+            return [];
         }
     }
 
